@@ -1,0 +1,7 @@
+MAJOR = 2
+MINOR = 0
+PATCH = 0
+BUILD = 3
+
+VERSION = "2.0.0.3"
+VERSION_SHORT = "2.0.0"

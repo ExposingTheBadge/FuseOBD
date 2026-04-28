@@ -1,0 +1,5 @@
+pywin32>=306
+anthropic>=0.40.0
+
+# Build dependencies (for creating FUSE.exe)
+pyinstaller>=6.0
