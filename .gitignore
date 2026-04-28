@@ -1,0 +1,11 @@
+build/
+dist/
+__pycache__/
+*.pyc
+*.pyo
+*.spec
+version_info.txt
+.env
+*.egg-info/
+.venv/
+venv/
