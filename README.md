@@ -39,7 +39,7 @@ pip install pyinstaller
 python build.py
 ```
 
-Output: `dist/FuseOBD.exe`
+Output: `dist/FuseOBD-v{VERSION}.exe`
 
 ## License
 

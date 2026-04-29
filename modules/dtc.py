@@ -76,14 +76,15 @@ class DTCReader:
             pass
 
         resp = self.uds.read_dtc(DTCSubFunction.REPORT_BY_STATUS, status_mask)
+        # resp = [reportType, DTCStatusAvailabilityMask, (DTC[3] status[1])*]
         if len(resp) < 2:
             return []
 
         dtcs = []
-        data = resp[1:]
-        for i in range(0, len(data) - 2, 4):
+        data = resp[2:]
+        for i in range(0, len(data) - 3, 4):
             dtc_bytes = data[i : i + 3]
-            status = data[i + 3] if i + 3 < len(data) else 0
+            status = data[i + 3]
             code = decode_dtc_bytes(dtc_bytes)
             if code:
                 dtcs.append(DTC(code=code, status=status, raw_bytes=dtc_bytes))
@@ -98,6 +99,7 @@ class DTCReader:
 
     def read_dtc_count(self) -> int:
         resp = self.uds.read_dtc(DTCSubFunction.REPORT_NUMBER_BY_STATUS, 0xFF)
-        if len(resp) >= 3:
-            return (resp[1] << 8) | resp[2]
+        # resp = [reportType, statusAvailabilityMask, formatId, count_hi, count_lo]
+        if len(resp) >= 5:
+            return (resp[3] << 8) | resp[4]
         return 0

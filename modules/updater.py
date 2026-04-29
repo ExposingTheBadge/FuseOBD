@@ -49,8 +49,11 @@ def _parse_version_short(tag: str) -> str:
         return tag.lstrip("v")
 
 
-def _fetch_json(url: str, timeout: float = CHECK_TIMEOUT) -> dict | None | int:
-    """Returns dict on success, None on network error, 404 on not found."""
+_NO_RELEASES = object()  # sentinel: server reachable but no releases published
+
+
+def _fetch_json(url: str, timeout: float = CHECK_TIMEOUT):
+    """Returns parsed dict on success, None on network error, _NO_RELEASES on 404."""
     ctx = ssl.create_default_context()
     req = urllib.request.Request(url, headers={
         "User-Agent": "FuseOBD/2.0",
@@ -58,12 +61,10 @@ def _fetch_json(url: str, timeout: float = CHECK_TIMEOUT) -> dict | None | int:
     })
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-            if resp.status == 404:
-                return 404  # No releases exist yet
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         if e.code == 404:
-            return 404
+            return _NO_RELEASES
         return None
     except Exception:
         return None
@@ -78,7 +79,7 @@ def check_for_update(current_version: str, current_build: int) -> UpdateInfo:
     if data is None:
         info.error = "Could not reach GitHub (offline?)"
         return info
-    if data == 404:
+    if data is _NO_RELEASES:
         # No releases exist yet — that's fine, nothing to update to
         info.error = ""
         return info

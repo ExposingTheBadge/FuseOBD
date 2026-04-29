@@ -125,10 +125,10 @@ class SecurityAccess:
                 if e.nrc == NRC.CONDITIONS_NOT_CORRECT:
                     result.error = "Conditions not correct — module rejected request"
                     return result
-                if e.nrc == NRC.EXCEEDED_NUMBER_OF_ATTEMPTS:
+                if e.nrc == NRC.EXCEEDED_ATTEMPTS:
                     result.error = "Exceeded attempts — module locked, power cycle required"
                     return result
-                if e.nrc == NRC.REQUIRED_TIME_DELAY_NOT_EXPIRED:
+                if e.nrc == NRC.TIME_DELAY_NOT_EXPIRED:
                     result.error = "Time delay active — wait and retry"
                     return result
             except Exception as e:
@@ -143,9 +143,9 @@ def _build_key_list(module: FordModule, level: int) -> list[bytes]:
     keys: list[bytes] = []
     seen: set[bytes] = set()
 
-    rx_id = module.address + 0x700
-    if rx_id in FORD_MODULE_KEYS:
-        module_keys = FORD_MODULE_KEYS[rx_id]
+    request_id = module.address + 0x700
+    if request_id in FORD_MODULE_KEYS:
+        module_keys = FORD_MODULE_KEYS[request_id]
         if level in module_keys:
             for k in module_keys[level]:
                 padded = (k + b"\x00" * 5)[:5]

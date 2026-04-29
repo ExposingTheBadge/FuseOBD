@@ -36,14 +36,13 @@ def _check_nt_query_debug_port() -> bool:
 
 def _check_nt_global_flag() -> bool:
     try:
-        peb_offset = 0x60 if ctypes.sizeof(ctypes.c_void_p) == 8 else 0x30
-        ntglobalflag_offset = 0xBC if ctypes.sizeof(ctypes.c_void_p) == 8 else 0x68
+        is_x64 = ctypes.sizeof(ctypes.c_void_p) == 8
+        peb_offset = 0x60 if is_x64 else 0x30
+        ntglobalflag_offset = 0xBC if is_x64 else 0x68
 
-        class PEB(ctypes.Structure):
-            pass
-
-        NtCurrentPeb = ctypes.c_void_p.in_dll(ntdll, "NtCurrentTeb")
-        teb_addr = ctypes.cast(NtCurrentPeb, ctypes.c_void_p).value
+        # NtCurrentTeb is exported as a function from ntdll on all modern Windows
+        ntdll.NtCurrentTeb.restype = ctypes.c_void_p
+        teb_addr = ntdll.NtCurrentTeb()
         if not teb_addr:
             return False
 
