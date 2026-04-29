@@ -96,7 +96,7 @@ class VehicleConnection:
                 except (UDSException, TimeoutError):
                     pass
                 found.append(info)
-            except (UDSException, TimeoutError, Exception):
+            except Exception:
                 client_to_remove = self._uds_clients.pop(module.address, None)
                 if client_to_remove:
                     try:
@@ -116,7 +116,7 @@ class VehicleConnection:
                     if len(vin) == 17:
                         self.vehicle_info.vin = vin
                         return vin
-                except (UDSException, TimeoutError, Exception):
+                except Exception:
                     pass
         return ""
 

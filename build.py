@@ -57,6 +57,8 @@ def bump_build():
         f.write(f"BUILD = {build_num}\n")
         f.write(f'\nVERSION = "{ver}"\n')
         f.write(f'VERSION_SHORT = "{ver_short}"\n')
+        f.write(f'\nAPP_NAME = "{app_name}"\n')
+        f.write(f'APP_DESC = "{app_desc}"\n')
 
     version_info = os.path.join(SCRIPT_DIR, "version_info.txt")
     with open(version_info, "w") as f:
@@ -162,8 +164,15 @@ def build():
 
     exe_path = os.path.join(DIST_DIR, "FuseOBD.exe")
     if os.path.exists(exe_path):
-        size_mb = os.path.getsize(exe_path) / (1024 * 1024)
-        print(f"\nBuild complete: {exe_path}")
+        # Stamp the version into the filename for distribution.
+        # Updater still finds it because it scans for any .exe asset.
+        versioned_name = f"FuseOBD-v{ver}.exe"
+        versioned_path = os.path.join(DIST_DIR, versioned_name)
+        if os.path.exists(versioned_path):
+            os.remove(versioned_path)
+        os.rename(exe_path, versioned_path)
+        size_mb = os.path.getsize(versioned_path) / (1024 * 1024)
+        print(f"\nBuild complete: {versioned_path}")
         print(f"Size: {size_mb:.1f} MB")
     else:
         print("\nBuild may have failed — exe not found at expected path")

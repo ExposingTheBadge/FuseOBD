@@ -57,10 +57,11 @@ def analyze_dtcs(module_dtcs: list, vehicle_info: str = "") -> dict:
     if not AUTH_TOKEN:
         return {"error": "No AI auth token configured. Set ANTHROPIC_AUTH_TOKEN in Windows system environment."}
 
-    # Build the fault list for the AI
+    # Build the fault list for the AI. Each `mod` is a dict with keys
+    # 'module_abbrev' and 'dtcs', mirroring MechanicChat.start_session().
     fault_lines = []
     for mod in module_dtcs:
-        for dtc in mod.dtcs:
+        for dtc in mod.get("dtcs", []):
             desc = dtc.get("description", "") or dtc.get("desc", "") or "No description available"
             status = dtc.get("status_text", "") or dtc.get("status", "")
             fault_lines.append(f"  [{mod['module_abbrev']}] {dtc['code']} — {desc}  [{status}]")

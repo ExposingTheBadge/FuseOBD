@@ -139,12 +139,14 @@ class MainWindow:
 
     def _auto_check_updates(self):
         """Silent check on startup. Only notifies if update is available."""
-        check_async(VERSION_SHORT, BUILD, self._on_update_result)
+        check_async(VERSION_SHORT, BUILD,
+                    lambda info: self.root.after(0, self._on_update_result, info))
 
     def _manual_check_updates(self):
         """User-initiated check. Always shows result."""
         self.global_status.config(text="Checking for updates...")
-        check_async(VERSION_SHORT, BUILD, lambda info: self._on_manual_result(info))
+        check_async(VERSION_SHORT, BUILD,
+                    lambda info: self.root.after(0, self._on_manual_result, info))
 
     def _on_update_result(self, info: UpdateInfo):
         """Callback for auto-check. Silent if up-to-date or offline."""

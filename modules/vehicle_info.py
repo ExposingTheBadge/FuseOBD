@@ -8,32 +8,56 @@ import ssl
 
 NHTSA_BASE = "https://vpic.nhtsa.dot.gov/api/vehicles"
 
-# Ford VIN position decoders for fallback when NHTSA is unavailable
-FORD_YEAR_CODES = {
+# VIN model-year tables. The 10th VIN char codes the year on a 30-year cycle.
+# Disambiguation rule: if VIN position 7 is alphabetic the cycle is 2010+,
+# if numeric the cycle is 1980-2009.
+FORD_YEAR_CODES_1980 = {
     "A": 1980, "B": 1981, "C": 1982, "D": 1983, "E": 1984, "F": 1985,
     "G": 1986, "H": 1987, "J": 1988, "K": 1989, "L": 1990, "M": 1991,
     "N": 1992, "P": 1993, "R": 1994, "S": 1995, "T": 1996, "V": 1997,
     "W": 1998, "X": 1999, "Y": 2000, "1": 2001, "2": 2002, "3": 2003,
     "4": 2004, "5": 2005, "6": 2006, "7": 2007, "8": 2008, "9": 2009,
-    "A": 2010, "B": 2011, "C": 2012, "D": 2013, "E": 2014, "F": 2015,
-    "G": 2016, "H": 2017, "J": 2018, "K": 2019, "L": 2020, "M": 2021,
-    "N": 2022, "P": 2023, "R": 2024, "S": 2025, "T": 2026,
 }
 
+FORD_YEAR_CODES_2010 = {
+    "A": 2010, "B": 2011, "C": 2012, "D": 2013, "E": 2014, "F": 2015,
+    "G": 2016, "H": 2017, "J": 2018, "K": 2019, "L": 2020, "M": 2021,
+    "N": 2022, "P": 2023, "R": 2024, "S": 2025, "T": 2026, "V": 2027,
+    "W": 2028, "X": 2029, "Y": 2030, "1": 2031, "2": 2032, "3": 2033,
+    "4": 2034, "5": 2035, "6": 2036, "7": 2037, "8": 2038, "9": 2039,
+}
+
+# Single-letter plant codes are reused across regions; entries combined
+# where both interpretations are plausible.
 FORD_PLANT_CODES = {
-    "A": "Atlanta, GA", "B": "Oakville, ON (Canada)", "C": "Ontario Truck, ON (Canada)",
-    "D": "Avon Lake, OH", "E": "Kentucky Truck, KY", "F": "Dearborn, MI",
-    "G": "Chicago, IL", "H": "Lorain, OH", "I": "Highland Park, MI",
-    "J": "Monterrey (Mexico)", "K": "Kansas City, MO", "L": "Michigan Truck, MI",
-    "M": "Cuautitlán (Mexico)", "N": "Norfolk, VA", "P": "Twin Cities, MN",
-    "R": "San Jose, CA", "S": "Allen Park, MI", "T": "Edison, NJ",
-    "U": "Louisville, KY", "V": "Kentucky Truck 2, KY", "W": "Wayne, MI",
-    "X": "St. Thomas, ON (Canada)", "Y": "Wixom, MI", "Z": "St. Louis, MO",
-    "0": "Detroit Chassis, MI", "5": "Flat Rock, MI", "8": "Broadmeadows (Australia)",
-    "9": "São Bernardo do Campo (Brazil)", "E": "Cologne (Germany)",
-    "G": "Halewood (UK)", "K": "General Pacheco (Argentina)",
-    "P": "Valencia (Spain)", "S": "Southampton (UK)", "T": "Çamlıca (Turkey)",
-    "V": "Craiova (Romania)", "W": "Saarlouis (Germany)",
+    "A": "Atlanta, GA",
+    "B": "Oakville, ON (Canada)",
+    "C": "Ontario Truck, ON (Canada)",
+    "D": "Avon Lake, OH",
+    "E": "Kentucky Truck, KY / Cologne (Germany)",
+    "F": "Dearborn, MI",
+    "G": "Chicago, IL / Halewood (UK)",
+    "H": "Lorain, OH",
+    "I": "Highland Park, MI",
+    "J": "Monterrey (Mexico)",
+    "K": "Kansas City, MO / General Pacheco (Argentina)",
+    "L": "Michigan Truck, MI",
+    "M": "Cuautitlán (Mexico)",
+    "N": "Norfolk, VA",
+    "P": "Twin Cities, MN / Valencia (Spain)",
+    "R": "San Jose, CA",
+    "S": "Allen Park, MI / Southampton (UK)",
+    "T": "Edison, NJ / Çamlıca (Turkey)",
+    "U": "Louisville, KY",
+    "V": "Kentucky Truck 2, KY / Craiova (Romania)",
+    "W": "Wayne, MI / Saarlouis (Germany)",
+    "X": "St. Thomas, ON (Canada)",
+    "Y": "Wixom, MI",
+    "Z": "St. Louis, MO",
+    "0": "Detroit Chassis, MI",
+    "5": "Flat Rock, MI",
+    "8": "Broadmeadows (Australia)",
+    "9": "São Bernardo do Campo (Brazil)",
 }
 
 WMI_DECODE = {
@@ -171,10 +195,13 @@ def decode_vin(vin: str) -> dict:
             elif var == "Note":
                 info["notes"] = val
 
-    # Fallback: decode model year from VIN position 10
+    # Fallback: decode model year from VIN position 10. Position 7 disambiguates
+    # the 30-year cycle: alphabetic = 2010-2039, numeric = 1980-2009.
     if "year" not in info:
         yc = vin[9]
-        info["year"] = str(FORD_YEAR_CODES.get(yc, 0)) if FORD_YEAR_CODES.get(yc) else f"19{yc}" if yc.isdigit() else f"20{yc}" if yc.isdigit() else "Unknown"
+        cycle = FORD_YEAR_CODES_2010 if vin[6].isalpha() else FORD_YEAR_CODES_1980
+        year = cycle.get(yc)
+        info["year"] = str(year) if year else "Unknown"
 
     # Fallback: decode assembly plant
     if "plant_city" not in info and "plant_country" not in info:
