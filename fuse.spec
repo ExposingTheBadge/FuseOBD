@@ -10,6 +10,7 @@ a = Analysis(
     datas=[
         ('LICENSE', '.'),
         ('drivers', 'drivers'),
+        ('fuse.ico', '.'),
     ],
     hiddenimports=[
         'core', 'core.j2534', 'core.protocols', 'core.uds', 'core.vehicle',
