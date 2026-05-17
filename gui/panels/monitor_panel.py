@@ -82,8 +82,8 @@ class MonitorPanel(ttk.Frame):
         self.avail_tree.bind("<Double-1>", lambda e: self._add_pid())
         self.live_tree.bind("<Double-1>", lambda e: self._remove_pid())
 
-        self._populate_available()
         self._pid_map: dict[str, PIDDefinition] = {}
+        self._populate_available()
 
     def _populate_available(self):
         self._pid_map.clear()
