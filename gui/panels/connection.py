@@ -29,6 +29,20 @@ class ConnectionPanel(ttk.LabelFrame):
         self.connect_btn = ttk.Button(row, text="Connect", command=self._toggle_connection, width=10)
         self.connect_btn.pack(side="left", padx=2)
 
+        # WiFi manual entry row
+        wifi_row = ttk.Frame(self)
+        wifi_row.pack(fill="x", pady=(5, 0))
+        ttk.Label(wifi_row, text="WiFi IP:").pack(side="left", padx=(0, 5))
+        self.wifi_ip_var = tk.StringVar(value="192.168.0.10")
+        self.wifi_ip_entry = ttk.Entry(wifi_row, textvariable=self.wifi_ip_var, width=16)
+        self.wifi_ip_entry.pack(side="left", padx=(0, 5))
+        ttk.Label(wifi_row, text="Port:").pack(side="left", padx=(0, 5))
+        self.wifi_port_var = tk.StringVar(value="35000")
+        self.wifi_port_entry = ttk.Entry(wifi_row, textvariable=self.wifi_port_var, width=6)
+        self.wifi_port_entry.pack(side="left", padx=(0, 5))
+        self.wifi_btn = ttk.Button(wifi_row, text="Add WiFi", command=self._add_wifi_adapter, width=10)
+        self.wifi_btn.pack(side="left", padx=2)
+
         info_row = ttk.Frame(self)
         info_row.pack(fill="x", pady=2)
 
@@ -48,10 +62,54 @@ class ConnectionPanel(ttk.LabelFrame):
 
     def refresh_devices(self):
         self.devices = enumerate_devices()
-        names = [f"{d.name} ({d.vendor})" for d in self.devices]
+        self._update_combo()
+
+    def _update_combo(self):
+        names = []
+        for d in self.devices:
+            if d.is_wifi:
+                names.append(f"{d.name} ({d.host}:{d.tcp_port})")
+            elif d.is_serial:
+                names.append(f"{d.name} ({d.port})")
+            else:
+                names.append(f"{d.name} ({d.vendor})")
         self.device_combo["values"] = names
         if names:
             self.device_combo.current(0)
+
+    def _add_wifi_adapter(self):
+        ip = self.wifi_ip_var.get().strip()
+        port_str = self.wifi_port_var.get().strip()
+        if not ip:
+            messagebox.showerror("Error", "Enter a WiFi IP address")
+            return
+        try:
+            port = int(port_str) if port_str else 35000
+        except ValueError:
+            port = 35000
+
+        # Check if already in list
+        for d in self.devices:
+            if d.host == ip and d.tcp_port == port:
+                # Select it
+                for i, name in enumerate(self.device_combo["values"]):
+                    if ip in name:
+                        self.device_combo.current(i)
+                        return
+                return
+
+        from core.j2534 import J2534Device
+        device = J2534Device(
+            name=f"WiFi OBD ({ip})",
+            vendor="WiFi/ELM327",
+            dll_path=ip,
+            host=ip,
+            tcp_port=port,
+            is_wifi=True,
+        )
+        self.devices.append(device)
+        self._update_combo()
+        self.device_combo.current(len(self.device_combo["values"]) - 1)
 
     def _toggle_connection(self):
         if self.connected:
