@@ -369,10 +369,6 @@ class DTCPanel(ttk.Frame):
             webbrowser.open(self._vehicle_image_url)
 
     def _start_ai_session(self):
-        if not self.all_dtcs and not self.vehicle_info:
-            messagebox.showinfo("Nothing to Diagnose", "Read fault codes or connect to a vehicle first.")
-            return
-
         self.ai_btn.config(state="disabled")
         self.chat_input.config(state="normal")
         self.chat_text.config(state="normal")
@@ -403,7 +399,10 @@ class DTCPanel(ttk.Frame):
 
                 self.chat = MechanicChat()
                 self.chat.start_session(self.vehicle_info, dtc_data)
-                response = self.chat.send_message("Start the diagnosis. What do you see?")
+                if dtc_data:
+                    response = self.chat.send_message("Start the diagnosis. What do you see?")
+                else:
+                    response = self.chat.send_message("Introduce yourself briefly and ask what I'd like help with today.")
 
                 self.after(0, lambda: self._append_chat("mechanic", response))
                 self.after(0, lambda: self.chat_status.config(text="Connected — ask anything"))
