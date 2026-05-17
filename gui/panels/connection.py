@@ -1,5 +1,6 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
+import threading
 from typing import Optional, Callable
 from core.j2534 import J2534, J2534Device, enumerate_devices, PassThruException
 
@@ -65,35 +66,52 @@ class ConnectionPanel(ttk.LabelFrame):
             return
 
         device = self.devices[idx]
-        try:
-            self.j2534 = J2534(device)
-            self.j2534.open()
+        self.connect_btn.config(state="disabled", text="Connecting...")
+        self.refresh_btn.config(state="disabled")
+        self.device_combo.config(state="disabled")
+        self.status_label.config(text="Connecting...", fg="orange")
 
-            fw, dll, api = self.j2534.read_version()
-            self.version_label.config(text=f"FW: {fw}  API: {api}")
-
+        def connect_thread():
             try:
-                voltage = self.j2534.read_battery_voltage()
-                self.voltage_label.config(text=f"Battery: {voltage:.1f}V")
-            except PassThruException:
-                self.voltage_label.config(text="")
+                self.j2534 = J2534(device)
+                self.j2534.open()
 
-            self.connected = True
-            self.connect_btn.config(text="Disconnect")
-            self.status_label.config(text="Connected", fg="green")
-            self.device_combo.config(state="disabled")
-            self.refresh_btn.config(state="disabled")
+                fw, dll, api = self.j2534.read_version()
 
-            self.on_connect(self.j2534)
-
-        except Exception as e:
-            messagebox.showerror("Connection Failed", str(e))
-            if self.j2534:
+                voltage = 0.0
                 try:
-                    self.j2534.close()
+                    voltage = self.j2534.read_battery_voltage()
                 except Exception:
-                    pass
-                self.j2534 = None
+                    voltage = 0.0
+
+                def on_connected():
+                    self.version_label.config(text=f"FW: {fw}  API: {api}")
+                    if voltage > 0:
+                        self.voltage_label.config(text=f"Battery: {voltage:.1f}V")
+                    self.connected = True
+                    self.connect_btn.config(state="normal", text="Disconnect")
+                    self.status_label.config(text="Connected", fg="green")
+                    self.on_connect(self.j2534)
+
+                self.after(0, on_connected)
+
+            except Exception as e:
+                def on_failed():
+                    self.connect_btn.config(state="normal", text="Connect")
+                    self.refresh_btn.config(state="normal")
+                    self.device_combo.config(state="readonly")
+                    self.status_label.config(text="Disconnected", fg="red")
+                    messagebox.showerror("Connection Failed", str(e))
+                    if self.j2534:
+                        try:
+                            self.j2534.close()
+                        except Exception:
+                            pass
+                        self.j2534 = None
+
+                self.after(0, on_failed)
+
+        threading.Thread(target=connect_thread, daemon=True).start()
 
     def _disconnect(self):
         self.on_disconnect()

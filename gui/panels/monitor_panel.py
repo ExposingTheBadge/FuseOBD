@@ -78,25 +78,34 @@ class MonitorPanel(ttk.Frame):
         self.live_tree.pack(side="left", fill="both", expand=True)
         live_scroll.pack(side="right", fill="y")
 
+        # Double-click to add/remove PIDs
+        self.avail_tree.bind("<Double-1>", lambda e: self._add_pid())
+        self.live_tree.bind("<Double-1>", lambda e: self._remove_pid())
+
         self._populate_available()
         self._pid_map: dict[str, PIDDefinition] = {}
 
     def _populate_available(self):
+        self._pid_map.clear()
         all_pids = STANDARD_PIDS + FORD_EXTENDED_PIDS
         for pid in all_pids:
             iid = self.avail_tree.insert("", "end", values=(pid.name, pid.unit, pid.module))
-            self._pid_map = getattr(self, "_pid_map", {})
             self._pid_map[iid] = pid
-
     def _add_pid(self):
         sel = self.avail_tree.selection()
+        if not sel:
+            return
         for iid in sel:
             pid = self._pid_map.get(iid)
             if pid:
-                existing = [self.live_tree.item(c)["values"][0] for c in self.live_tree.get_children()]
+                # Check if already in live tree
+                existing = {self.live_tree.item(c)["values"][0] for c in self.live_tree.get_children()}
                 if pid.name not in existing:
-                    tree_id = self.live_tree.insert("", "end", iid=f"live_{pid.did:04X}",
-                                                     values=(pid.name, "--", "--", pid.unit))
+                    self.live_tree.insert("", "end", iid=f"live_{pid.did:04X}",
+                                           values=(pid.name, "--", "--", pid.unit))
+        # Auto-expand to show added PIDs
+        if self.live_tree.get_children():
+            self.live_tree.see(self.live_tree.get_children()[0])
 
     def _remove_pid(self):
         sel = self.live_tree.selection()

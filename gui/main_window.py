@@ -235,6 +235,8 @@ class MainWindow:
         except Exception as e:
             messagebox.showwarning("MS CAN", f"Could not open MS CAN: {e}")
         self.global_status.config(text="Connected — ready to scan")
+        # Enable AI Mechanic button now that vehicle is connected
+        self.dtc_panel.ai_btn.config(state="normal")
 
     def _on_disconnect(self):
         self.monitor_panel.stop_monitor()
