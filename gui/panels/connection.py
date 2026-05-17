@@ -43,6 +43,12 @@ class ConnectionPanel(ttk.LabelFrame):
         self.wifi_btn = ttk.Button(wifi_row, text="Add WiFi", command=self._add_wifi_adapter, width=10)
         self.wifi_btn.pack(side="left", padx=2)
 
+        # Bluetooth button
+        bt_row = ttk.Frame(self)
+        bt_row.pack(fill="x", pady=(5, 0))
+        self.bt_btn = ttk.Button(bt_row, text="Bluetooth Devices", command=self._scan_bluetooth, width=20)
+        self.bt_btn.pack(side="left", padx=2)
+
         info_row = ttk.Frame(self)
         info_row.pack(fill="x", pady=2)
 
@@ -110,6 +116,129 @@ class ConnectionPanel(ttk.LabelFrame):
         self.devices.append(device)
         self._update_combo()
         self.device_combo.current(len(self.device_combo["values"]) - 1)
+
+    def _scan_bluetooth(self):
+        """Open a popup listing all paired Bluetooth devices for selection."""
+        self.bt_btn.config(state="disabled", text="Scanning...")
+        # Fetch BT devices in background thread (PowerShell call takes ~2-5s)
+        def fetch():
+            devices = self._list_bluetooth_devices()
+            self.after(0, lambda: self._show_bt_popup(devices))
+
+        threading.Thread(target=fetch, daemon=True).start()
+
+    def _list_bluetooth_devices(self) -> list[tuple[str, str]]:
+        """Return [(name, device_id), ...] for all paired Bluetooth devices."""
+        import subprocess
+        ps_cmd = (
+            'powershell -NoProfile -Command "'
+            '[Windows.Devices.Radios.Radio,Windows.System.Profile,ContentType=WindowsRuntime] | Out-Null;'
+            '[Windows.Devices.Enumeration.DeviceInformation,Windows.Devices.Enumeration,ContentType=WindowsRuntime] | Out-Null;'
+            'Add-Type -AssemblyName System.Runtime.WindowsRuntime;'
+            '$async = [Windows.Devices.Enumeration.DeviceInformation]::FindAllAsync('
+            '[Windows.Devices.Bluetooth.BluetoothDevice]::GetDeviceSelectorFromPairingState($true));'
+            '$task = $async.AsTask(); $task.Wait(5000);'
+            'if ($task.IsCompleted) {'
+            '  foreach ($d in $task.Result) { Write-Output \"$($d.Name)|||$($d.Id)\" }'
+            '} else { Write-Output \"SCAN_TIMEOUT\" }"'
+        )
+        devices = []
+        try:
+            result = subprocess.run(ps_cmd, capture_output=True, text=True, timeout=12, shell=True)
+            if result.returncode != 0:
+                return [("⚠ PowerShell error", "")]
+            for line in result.stdout.strip().split("\n"):
+                line = line.strip()
+                if not line or line == "SCAN_TIMEOUT":
+                    continue
+                if "|||" in line:
+                    parts = line.split("|||", 1)
+                    name = parts[0].strip()
+                    dev_id = parts[1].strip() if len(parts) > 1 else ""
+                    if name:
+                        devices.append((name, dev_id))
+        except subprocess.TimeoutExpired:
+            return [("⚠ Scan timed out", "")]
+        except FileNotFoundError:
+            return [("⚠ PowerShell not available", "")]
+        except Exception as e:
+            return [(f"⚠ Error: {e}", "")]
+        if not devices:
+            return [("No paired Bluetooth devices found", "")]
+        return devices
+
+    def _show_bt_popup(self, devices: list[tuple[str, str]]):
+        """Show popup with paired BT devices for selection."""
+        self.bt_btn.config(state="normal", text="Bluetooth Devices")
+        popup = tk.Toplevel(self)
+        popup.title("Bluetooth Devices")
+        popup.geometry("500x400")
+        popup.resizable(True, True)
+        popup.transient(self)
+        popup.grab_set()
+
+        ttk.Label(popup, text="Select a Bluetooth OBD adapter:",
+                  font=("Segoe UI", 11, "bold")).pack(pady=(15, 5), padx=20, anchor="w")
+        ttk.Label(popup, text="Tip: Pair your adapter in Windows Bluetooth settings first",
+                  font=("Segoe UI", 8), foreground="#888888").pack(pady=(0, 5), padx=20, anchor="w")
+
+        # Scrollable list
+        frame = ttk.Frame(popup)
+        frame.pack(fill="both", expand=True, padx=20, pady=5)
+        tree = ttk.Treeview(frame, columns=("name",), show="headings", height=12)
+        tree.heading("name", text="Paired Bluetooth Devices")
+        tree.column("name", width=440)
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scroll.set)
+        tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+
+        for name, dev_id in devices:
+            tag = "error" if name.startswith("⚠") or name.startswith("No") else "device"
+            tree.insert("", "end", values=(name,), tags=(tag,))
+        tree.tag_configure("error", foreground="#ff4444")
+
+        def on_select():
+            sel = tree.selection()
+            if not sel:
+                return
+            name = tree.item(sel[0])["values"][0]
+            if name.startswith("⚠") or name.startswith("No"):
+                return
+            # Check if this BT device has a COM port
+            from core.j2534 import J2534Device
+            bt_com = _find_bt_com_port(name) if "_find_bt_com_port" in dir() else ""
+            if bt_com:
+                device = J2534Device(
+                    name=f"{name} ({bt_com})",
+                    vendor="Bluetooth ELM327",
+                    dll_path=bt_com,
+                    port=bt_com,
+                    is_serial=True,
+                )
+            else:
+                # Device may not have SPP service active — show warning
+                if not messagebox.askyesno("No COM Port",
+                        f"'{name}' does not have a COM port assigned.\n\n"
+                        "Make sure the device is paired AND has 'Serial Port' "
+                        "(SPP) service enabled in Windows Bluetooth settings.\n\n"
+                        "Try unpair and re-pair if needed.\n\n"
+                        "Add it to the list anyway?"):
+                    return
+                device = J2534Device(
+                    name=f"{name} (Bluetooth)",
+                    vendor="Bluetooth ELM327",
+                    dll_path="",
+                    is_serial=False,
+                )
+            self.devices.append(device)
+            self._update_combo()
+            self.device_combo.current(len(self.device_combo["values"]) - 1)
+            popup.destroy()
+
+        ttk.Button(popup, text="Select", command=on_select, width=12).pack(pady=10)
+        ttk.Button(popup, text="Cancel", command=popup.destroy, width=8).pack(pady=(0, 15))
+        tree.bind("<Double-1>", lambda e: on_select())
 
     def _toggle_connection(self):
         if self.connected:

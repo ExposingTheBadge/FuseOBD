@@ -741,12 +741,183 @@ def _enumerate_wifi_adapters() -> list[J2534Device]:
 
 
 def _enumerate_bluetooth_adapters() -> list[J2534Device]:
-    """Scan paired Bluetooth SPP COM ports (these appear in SERIALCOMM already,
-    but we check for BT-specific device names)."""
-    # Bluetooth SPP devices appear as COM ports and are already caught
-    # by _enumerate_com_ports. This is a no-op for now but provides a hook
-    # for future BT-specific scanning.
-    return []
+    """Scan Windows for paired Bluetooth devices that may be OBD adapters.
+
+    BT SPP devices get COM ports (caught by _enumerate_com_ports), but we
+    also scan the paired BT device list for adapters that haven't been
+    assigned COM ports yet, and check for common OBD BT names/IDs.
+    """
+    devices = []
+    import subprocess
+    # Use PowerShell to query paired Bluetooth devices via WinRT
+    ps_cmd = (
+        'powershell -NoProfile -Command "'
+        '[Windows.Devices.Radios.Radio,Windows.System.Profile,ContentType=WindowsRuntime] | Out-Null;'
+        '[Windows.Devices.Enumeration.DeviceInformation,Windows.Devices.Enumeration,ContentType=WindowsRuntime] | Out-Null;'
+        '$sel = [Windows.Devices.Enumeration.DeviceInformation]::FindAllAsync('
+        '[Windows.Devices.Bluetooth.BluetoothDevice]::GetDeviceSelectorFromPairingState($true));'
+        '$task = $sel.AsTask(); $task.Wait(5000);'
+        'if ($task.IsCompleted) { $devs = $task.Result; foreach ($d in $devs) {'
+        'Write-Output "$($d.Name)|$($d.Id)|$($d.Kind)" } }"'
+    )
+    try:
+        result = subprocess.run(ps_cmd, capture_output=True, text=True, timeout=10, shell=True)
+        for line in result.stdout.strip().split("\n"):
+            line = line.strip()
+            if not line or "|" not in line:
+                continue
+            parts = line.split("|", 2)
+            name = parts[0].strip() if len(parts) > 0 else ""
+            dev_id = parts[1].strip() if len(parts) > 1 else ""
+            if not name:
+                continue
+            # OBD adapters often have telltale names
+            obd_keywords = ["OBD", "ELM", "STN", "OBDII", "OBD2", "V-LINK",
+                           "VEEPEAK", "Viecar", "BAFX", "ScanTool", "PLX",
+                           "CARISTA", "OBDLink", "VGATE", "iCar", "BlueDriver",
+                           "Foseal", "KOBRA", "Panlong", "Lufi", "Tonwon"]
+            is_obd = any(kw.lower() in name.lower() for kw in obd_keywords)
+            if not is_obd:
+                continue
+            # Check if this BT device already has a COM port assigned
+            already_com = False
+            com_devices = _enumerate_com_ports()
+            for cd in com_devices:
+                cd_name = cd.name.lower()
+                if any(kw.lower() in cd_name for kw in obd_keywords):
+                    already_com = True
+                    break
+            if not already_com:
+                # Look for COM port in the BT device's services
+                bt_com = _find_bt_com_port(name)
+                if bt_com:
+                    devices.append(J2534Device(
+                        name=f"{name} ({bt_com})",
+                        vendor="Bluetooth ELM327",
+                        dll_path=bt_com,
+                        port=bt_com,
+                        is_serial=True,
+                    ))
+                else:
+                    # Show as BT device even without COM port (needs pairing)
+                    devices.append(J2534Device(
+                        name=f"{name} (Bluetooth — pair first)",
+                        vendor="Bluetooth ELM327",
+                        dll_path="",
+                        is_serial=False,
+                    ))
+    except Exception:
+        pass
+    return devices
+
+
+def _find_bt_com_port(device_name: str) -> str:
+    """Check if a Bluetooth SPP device has a COM port assigned in registry."""
+    try:
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                             r"HARDWARE\DEVICEMAP\SERIALCOMM",
+                             0, winreg.KEY_READ)
+    except OSError:
+        return ""
+
+    ports = []
+    i = 0
+    while True:
+        try:
+            path, port, _typ = winreg.EnumValue(key, i)
+            # Bluetooth SPP COM ports have device paths containing Bth/
+            if "Bth" in path or "Bluetooth" in path:
+                ports.append((path, port))
+            i += 1
+        except OSError:
+            break
+    winreg.CloseKey(key)
+
+    # Walk Enum\BTHENUM to match device to port
+    for dev_reg in [r"SYSTEM\CurrentControlSet\Enum\BTHENUM",
+                     r"SYSTEM\CurrentControlSet\Enum\BTH"]:
+        try:
+            bth = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, dev_reg, 0, winreg.KEY_READ)
+        except OSError:
+            continue
+        try:
+            i = 0
+            while True:
+                try:
+                    sub = winreg.EnumKey(bth, i)
+                except OSError:
+                    break
+                i += 1
+                try:
+                    subk = winreg.OpenKey(bth, sub, 0, winreg.KEY_READ)
+                    j = 0
+                    while True:
+                        try:
+                            inst = winreg.EnumKey(subk, j)
+                        except OSError:
+                            break
+                        j += 1
+                        try:
+                            dev = winreg.OpenKey(subk, inst, 0, winreg.KEY_READ)
+                            friendly = ""
+                            try:
+                                friendly = winreg.QueryValueEx(dev, "FriendlyName")[0]
+                            except OSError:
+                                pass
+                            winreg.CloseKey(dev)
+                            if device_name.lower()[:8] in friendly.lower() or \
+                               friendly.lower()[:8] in device_name.lower()[:8]:
+                                # Found matching BT device, look for COM port child
+                                child_path = f"{dev_reg}\\{sub}\\{inst}"
+                                port = _find_com_port_child(child_path)
+                                if port:
+                                    return port
+                        except OSError:
+                            pass
+                    winreg.CloseKey(subk)
+                except OSError:
+                    pass
+        finally:
+            winreg.CloseKey(bth)
+
+    # If we found BT COM ports but couldn't match, return the first one
+    if ports:
+        return ports[0][1]
+    return ""
+
+
+def _find_com_port_child(parent_path: str) -> str:
+    """Walk a registry device tree looking for a child with a PortName."""
+    try:
+        dp_path = f"{parent_path}\\Device Parameters"
+        dp = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, dp_path, 0, winreg.KEY_READ)
+        try:
+            pn = winreg.QueryValueEx(dp, "PortName")[0]
+            return pn
+        except OSError:
+            pass
+        winreg.CloseKey(dp)
+    except OSError:
+        pass
+
+    # Walk children
+    try:
+        parent = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, parent_path, 0, winreg.KEY_READ)
+        k = 0
+        while True:
+            try:
+                child = winreg.EnumKey(parent, k)
+            except OSError:
+                break
+            k += 1
+            result = _find_com_port_child(f"{parent_path}\\{child}")
+            if result:
+                winreg.CloseKey(parent)
+                return result
+        winreg.CloseKey(parent)
+    except OSError:
+        return ""
+    return ""
 
 
 class J2534:
