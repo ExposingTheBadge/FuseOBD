@@ -181,8 +181,11 @@ class J2534Device:
     vendor: str
     dll_path: str
     config_app: str = ""
-    port: str = ""
+    port: str = ""        # COM port for USB serial adapters
+    host: str = ""        # IP address for WiFi adapters
+    tcp_port: int = 35000 # TCP port for WiFi adapters
     is_serial: bool = False
+    is_wifi: bool = False
 
 
 def _get_com_port_parent_info(device_path: str) -> tuple[str, str, str]:
@@ -474,12 +477,26 @@ def enumerate_devices() -> list[J2534Device]:
     com_devices = _enumerate_com_ports()
     devices.extend(com_devices)
 
-    # Deduplicate by dll_path (J2534) or port (serial)
+    # Phase 3: WiFi (ELM327 over TCP) adapters
+    wifi_devices = _enumerate_wifi_adapters()
+    devices.extend(wifi_devices)
+
+    # Phase 4: Bluetooth SPP adapters
+    bt_devices = _enumerate_bluetooth_adapters()
+    devices.extend(bt_devices)
+
+    # Deduplicate by dll_path (J2534), port (serial), or host (wifi)
     seen_dll = set()
     seen_port = set()
+    seen_host = set()
     unique = []
     for d in devices:
-        if d.is_serial:
+        if d.is_wifi:
+            key = (d.host, d.tcp_port)
+            if key not in seen_host:
+                seen_host.add(key)
+                unique.append(d)
+        elif d.is_serial:
             if d.port and d.port not in seen_port:
                 seen_port.add(d.port)
                 unique.append(d)
@@ -618,17 +635,133 @@ class _WinSerial:
         self._kernel32.PurgeComm(self.handle, PURGE_RXCLEAR | PURGE_TXCLEAR)
 
 
+class _TcpTransport:
+    """TCP socket transport for WiFi ELM327 adapters."""
+
+    def __init__(self, host: str, port: int = 35000):
+        self.host = host
+        self.port = port
+        self._sock = None
+
+    def open(self, baudrate: int = 38400):
+        import socket as _socket
+        self._sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        self._sock.settimeout(3.0)
+        self._sock.connect((self.host, self.port))
+        self._sock.settimeout(1.0)
+
+    def close(self):
+        if self._sock:
+            try:
+                self._sock.shutdown(1)
+            except Exception:
+                pass
+            try:
+                self._sock.close()
+            except Exception:
+                pass
+            self._sock = None
+
+    def write(self, data: bytes):
+        self._sock.sendall(data)
+
+    def read(self, size: int = 256, timeout_ms: int = 1000) -> bytes:
+        self._sock.settimeout(timeout_ms / 1000.0)
+        try:
+            return self._sock.recv(size)
+        except OSError:
+            return b""
+
+    def read_until(self, timeout_ms: int = 1000) -> bytes:
+        import time as _time
+        self._sock.settimeout(0.05)
+        result = bytearray()
+        deadline = _time.time() + timeout_ms / 1000.0
+        while _time.time() < deadline:
+            try:
+                chunk = self._sock.recv(256)
+                if chunk:
+                    result.extend(chunk)
+                else:
+                    break
+            except OSError:
+                if result:
+                    break
+                _time.sleep(0.01)
+        return bytes(result)
+
+    def flush(self):
+        # Drain any pending data
+        self._sock.settimeout(0.05)
+        for _ in range(10):
+            try:
+                d = self._sock.recv(256)
+                if not d:
+                    break
+            except OSError:
+                break
+
+
+def _ping_wifi_adapter(host: str, port: int = 35000, timeout: float = 2.0) -> bool:
+    """Check if a WiFi ELM327 adapter is reachable at host:port."""
+    import socket as _socket
+    try:
+        s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect((host, port))
+        s.close()
+        return True
+    except Exception:
+        return False
+
+
+def _enumerate_wifi_adapters() -> list[J2534Device]:
+    """Scan common WiFi OBD adapter IP addresses."""
+    import socket as _socket
+    wifi_subnets = [
+        "192.168.0.10",    # Most common ELM327 WiFi default
+        "192.168.0.1",     # Some adapters
+        "192.168.1.10",
+        "10.0.0.1",
+        "192.168.4.1",     # ESP32-based adapters
+        "192.168.1.1",
+    ]
+    devices = []
+    for ip in wifi_subnets:
+        if _ping_wifi_adapter(ip):
+            devices.append(J2534Device(
+                name=f"WiFi OBD Adapter ({ip})",
+                vendor="WiFi/ELM327",
+                dll_path=ip,
+                host=ip,
+                tcp_port=35000,
+                is_wifi=True,
+            ))
+    return devices
+
+
+def _enumerate_bluetooth_adapters() -> list[J2534Device]:
+    """Scan paired Bluetooth SPP COM ports (these appear in SERIALCOMM already,
+    but we check for BT-specific device names)."""
+    # Bluetooth SPP devices appear as COM ports and are already caught
+    # by _enumerate_com_ports. This is a no-op for now but provides a hook
+    # for future BT-specific scanning.
+    return []
+
+
 class J2534:
     def __init__(self, device: J2534Device):
         self.device = device
         self.device_id: Optional[int] = None
         self._serial: Optional[_WinSerial] = None
+        self._tcp: Optional[_TcpTransport] = None
         self._channels: dict[int, dict] = {}
         self._next_channel = 0
         self._is_serial = device.is_serial
+        self._is_wifi = device.is_wifi
 
-        if self._is_serial:
-            self._serial = _WinSerial(device.port)
+        if self._is_serial or self._is_wifi:
+            self._stream = _WinSerial(device.port)
         else:
             self.dll = ctypes.WinDLL(device.dll_path)
             self._setup_functions()
@@ -703,21 +836,31 @@ class J2534:
             raise PassThruException(ret, f"{context}: {msg}" if context else msg)
 
     def open(self):
-        if self._is_serial:
-            # Auto-detect baud rate — try common rates, send ATI to validate
-            for baud in (38400, 115200, 500000, 230400, 9600, 921600, 2000000):
-                try:
-                    self._serial.open(baud)
-                    self._elm_init(self._serial, baud)
-                    # Verify communication with a simple command
-                    resp = self._elm_cmd(self._serial, "ATI", timeout_ms=800)
-                    if resp and len(resp) > 2 and "?" not in resp[:4]:
-                        self._elm_init(self._serial, baud)  # Full init
-                        return
-                except Exception:
-                    pass
-                self._serial.close()
-            raise ELM327Exception(f"Could not initialize adapter on {self.device.port}")
+        if self._is_serial or self._is_wifi:
+            self._stream = self._tcp if self._is_wifi else self._serial
+            if self._is_wifi:
+                # WiFi: direct TCP connect, no baud rate
+                self._stream.open()
+                self._elm_init(self._stream)
+                resp = self._elm_cmd(self._stream, "ATI", timeout_ms=1200)
+                if resp and len(resp) > 2 and "?" not in resp[:4]:
+                    self._elm_init(self._stream)  # Full init
+                    return
+                raise ELM327Exception(f"WiFi adapter at {self.device.host} not responding as ELM327")
+            else:
+                # Serial: auto-detect baud rate
+                for baud in (38400, 115200, 500000, 230400, 9600, 921600, 2000000):
+                    try:
+                        self._stream.open(baud)
+                        self._elm_init(self._stream)
+                        resp = self._elm_cmd(self._stream, "ATI", timeout_ms=800)
+                        if resp and len(resp) > 2 and "?" not in resp[:4]:
+                            self._elm_init(self._stream)  # Full init
+                            return
+                    except Exception:
+                        pass
+                    self._stream.close()
+                raise ELM327Exception(f"Could not initialize adapter on {self.device.port}")
         else:
             dev_id = c_ulong()
             ret = self._PassThruOpen(None, byref(dev_id))
@@ -725,10 +868,10 @@ class J2534:
             self.device_id = dev_id.value
 
     def close(self):
-        if self._is_serial:
-            if self._serial:
-                self._serial.close()
-                self._serial = None
+        if self._is_serial or self._is_wifi:
+            if self._stream:
+                self._stream.close()
+                self._stream = None
         else:
             if self.device_id is not None:
                 ret = self._PassThruClose(self.device_id)
@@ -736,12 +879,12 @@ class J2534:
                 self.device_id = None
 
     def read_version(self) -> tuple[str, str, str]:
-        if self._is_serial:
-            fw = self._elm_cmd(self._serial, "ATI")
+        if self._is_serial or self._is_wifi:
+            fw = self._elm_cmd(self._stream, "ATI")
             # Try STN extended version too
             stn = ""
             try:
-                stn = self._elm_cmd(self._serial, "STI")
+                stn = self._elm_cmd(self._stream, "STI")
             except Exception:
                 pass
             return (fw.strip(), stn.strip() if stn else "ELM327", "ELM327")
@@ -758,8 +901,8 @@ class J2534:
             )
 
     def read_battery_voltage(self) -> float:
-        if self._is_serial:
-            resp = self._elm_cmd(self._serial, "ATRV")
+        if self._is_serial or self._is_wifi:
+            resp = self._elm_cmd(self._stream, "ATRV")
             try:
                 return float(resp.strip().rstrip("V"))
             except ValueError:
@@ -771,7 +914,7 @@ class J2534:
             return voltage.value / 1000.0
 
     def connect(self, protocol: Protocol, flags: int = 0, baudrate: int = 500000) -> int:
-        if self._is_serial:
+        if self._is_serial or self._is_wifi:
             ch = self._next_channel
             self._next_channel += 1
             self._channels[ch] = {
@@ -791,7 +934,7 @@ class J2534:
             return channel_id.value
 
     def disconnect(self, channel_id: int):
-        if self._is_serial:
+        if self._is_serial or self._is_wifi:
             self._channels.pop(channel_id, None)
         else:
             ret = self._PassThruDisconnect(channel_id)
@@ -799,7 +942,7 @@ class J2534:
 
     def start_msg_filter(self, channel_id: int, filter_type: FilterType,
                          mask: bytes, pattern: bytes, flow_control: Optional[bytes] = None) -> int:
-        if self._is_serial:
+        if self._is_serial or self._is_wifi:
             ch = self._channels.get(channel_id)
             if ch is None:
                 return 0
@@ -816,14 +959,14 @@ class J2534:
                 ch["tx_id"] = tx_id
             # Set CAN filter on adapter
             if ch["rx_id"] is not None:
-                self._elm_cmd(self._serial, f"AT CRA {ch['rx_id']:X}")
+                self._elm_cmd(self._stream, f"AT CRA {ch['rx_id']:X}")
             if ch["tx_id"] is not None:
-                self._elm_cmd(self._serial, f"AT SH {ch['tx_id']:X}")
+                self._elm_cmd(self._stream, f"AT SH {ch['tx_id']:X}")
                 # Flow control: when we transmit, the adapter should expect
                 # flow control frames from the ECU. Use our TX ID as FC source.
-                self._elm_cmd(self._serial, f"AT FC SH {ch['tx_id']:X}")
-                self._elm_cmd(self._serial, "AT FC SD 30 00 00")
-                self._elm_cmd(self._serial, "AT FC SM 1")
+                self._elm_cmd(self._stream, f"AT FC SH {ch['tx_id']:X}")
+                self._elm_cmd(self._stream, "AT FC SD 30 00 00")
+                self._elm_cmd(self._stream, "AT FC SM 1")
             ch["filter_id"] = 1
             return 1
         else:
@@ -841,7 +984,7 @@ class J2534:
             return filter_id.value
 
     def stop_msg_filter(self, channel_id: int, filter_id: int):
-        if self._is_serial:
+        if self._is_serial or self._is_wifi:
             pass  # Filters cleared on next connect or at close
         else:
             ret = self._PassThruStopMsgFilter(channel_id, filter_id)
@@ -849,18 +992,18 @@ class J2534:
 
     def write_msg(self, channel_id: int, data: bytes, protocol: Protocol = Protocol.ISO15765,
                   tx_flags: int = 0, timeout: int = 1000):
-        if self._is_serial:
+        if self._is_serial or self._is_wifi:
             ch = self._channels.get(channel_id)
             if ch is None:
                 raise ELM327Exception(f"Invalid channel {channel_id}")
             # Build CAN frame: CAN ID (4 bytes big-endian) + data
-            self._serial.flush()
+            self._stream.flush()
             # Send as hex via ELM327
             # For ISO 15765, ELM327 expects: len, data bytes
             # But for raw CAN mode we send: CAN ID + data
             hex_data = data.hex().upper()
-            self._serial.write((hex_data + "\r").encode("ascii"))
-            self._serial.read(256, 100)  # Consume echo
+            self._stream.write((hex_data + "\r").encode("ascii"))
+            self._stream.read(256, 100)  # Consume echo
         else:
             msg = self._build_msg(protocol, data, tx_flags=tx_flags)
             num = c_ulong(1)
@@ -868,7 +1011,7 @@ class J2534:
             self._check(ret, "PassThruWriteMsgs")
 
     def read_msgs(self, channel_id: int, count: int = 1, timeout: int = 1000) -> list[bytes]:
-        if self._is_serial:
+        if self._is_serial or self._is_wifi:
             ch = self._channels.get(channel_id)
             if ch is None:
                 return []
@@ -876,7 +1019,7 @@ class J2534:
             deadline = _time.time() + timeout / 1000.0
             results = []
             while _time.time() < deadline and len(results) < count:
-                data = self._serial.read(256, max(50, timeout // 2))
+                data = self._stream.read(256, max(50, timeout // 2))
                 if data:
                     text = data.decode("ascii", errors="replace").strip()
                     if text and ">" not in text:
@@ -904,7 +1047,7 @@ class J2534:
 
     def start_periodic_msg(self, channel_id: int, data: bytes, protocol: Protocol,
                            interval_ms: int, tx_flags: int = 0) -> int:
-        if self._is_serial:
+        if self._is_serial or self._is_wifi:
             return 0  # Not supported — call write_msg periodically instead
         else:
             msg = self._build_msg(protocol, data, tx_flags=tx_flags)
@@ -914,14 +1057,14 @@ class J2534:
             return msg_id.value
 
     def stop_periodic_msg(self, channel_id: int, msg_id: int):
-        if self._is_serial:
+        if self._is_serial or self._is_wifi:
             pass
         else:
             ret = self._PassThruStopPeriodicMsg(channel_id, msg_id)
             self._check(ret, "PassThruStopPeriodicMsg")
 
     def set_config(self, channel_id: int, params: dict[int, int]):
-        if self._is_serial:
+        if self._is_serial or self._is_wifi:
             pass  # Not needed for ELM327
         else:
             configs = (SCONFIG * len(params))()
@@ -933,7 +1076,7 @@ class J2534:
             self._check(ret, "SetConfig")
 
     def get_config(self, channel_id: int, params: list[int]) -> dict[int, int]:
-        if self._is_serial:
+        if self._is_serial or self._is_wifi:
             return {}
         else:
             configs = (SCONFIG * len(params))()
@@ -945,30 +1088,30 @@ class J2534:
             return {configs[i].Parameter: configs[i].Value for i in range(len(params))}
 
     def clear_rx_buffer(self, channel_id: int):
-        if self._is_serial:
-            self._serial.flush()
+        if self._is_serial or self._is_wifi:
+            self._stream.flush()
         else:
             ret = self._PassThruIoctl(channel_id, IoctlID.CLEAR_RX_BUFFER, None, None)
             self._check(ret, "ClearRxBuffer")
 
     def clear_tx_buffer(self, channel_id: int):
-        if self._is_serial:
-            self._serial.flush()
+        if self._is_serial or self._is_wifi:
+            self._stream.flush()
         else:
             ret = self._PassThruIoctl(channel_id, IoctlID.CLEAR_TX_BUFFER, None, None)
             self._check(ret, "ClearTxBuffer")
 
     # ── ELM327 protocol helpers ──
 
-    def _elm_cmd(self, serial: _WinSerial, cmd: str, timeout_ms: int = 1000) -> str:
+    def _elm_cmd(self, stream, cmd: str, timeout_ms: int = 1000) -> str:
         """Send an AT command and return the response (stripped)."""
-        serial.flush()
-        serial.write((cmd + "\r").encode("ascii"))
+        stream.flush()
+        stream.write((cmd + "\r").encode("ascii"))
         import time as _time
         result = bytearray()
         deadline = _time.time() + timeout_ms / 1000.0
         while _time.time() < deadline:
-            chunk = serial.read(256, 50)
+            chunk = stream.read(256, 50)
             if chunk:
                 result.extend(chunk)
                 text = bytes(result).decode("ascii", errors="replace")
@@ -992,15 +1135,14 @@ class J2534:
             lines.append(line)
         return "\n".join(lines).strip()
 
-    def _elm_init(self, serial: _WinSerial, baudrate: int = 115200):
-        """Initialize ELM327 adapter with standard settings."""
-        # Try higher baud rate first, fall back
-        serial.flush()
+    def _elm_init(self, stream):
+        """Initialize ELM327/STN adapter with standard settings."""
+        stream.flush()
         # Reset
-        serial.write(b"AT Z\r")
+        stream.write(b"AT Z\r")
         import time as _time
-        _time.sleep(0.5)
-        serial.read(256, 200)  # Consume startup message
+        _time.sleep(0.8)
+        stream.read(256, 300)  # Consume startup message
 
         cmds = [
             "AT E0",   # Echo off
@@ -1011,7 +1153,7 @@ class J2534:
             "AT ST FF",  # Max timeout
         ]
         for cmd in cmds:
-            self._elm_cmd(serial, cmd, 500)
+            self._elm_cmd(stream, cmd, 600)
 
     def clear_filters(self, channel_id: int):
         ret = self._PassThruIoctl(channel_id, IoctlID.CLEAR_MSG_FILTERS, None, None)
