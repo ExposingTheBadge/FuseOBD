@@ -477,13 +477,9 @@ def enumerate_devices() -> list[J2534Device]:
     com_devices = _enumerate_com_ports()
     devices.extend(com_devices)
 
-    # Phase 3: WiFi (ELM327 over TCP) adapters
-    wifi_devices = _enumerate_wifi_adapters()
-    devices.extend(wifi_devices)
-
-    # Phase 4: Bluetooth SPP adapters
-    bt_devices = _enumerate_bluetooth_adapters()
-    devices.extend(bt_devices)
+    # Phase 3: WiFi (ELM327 over TCP) — skip slow network scan at startup;
+    # user adds WiFi adapters manually via the connection panel.
+    # Phase 4: Bluetooth SPP — scanned on-demand via the BT button.
 
     # Deduplicate by dll_path (J2534), port (serial), or host (wifi)
     seen_dll = set()

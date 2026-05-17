@@ -41,6 +41,15 @@ class MainWindow:
         self.root.geometry("1200x750")
         self.root.minsize(900, 600)
 
+        # Set window icon (matches the exe icon)
+        import sys, os as _os
+        if getattr(sys, 'frozen', False):
+            icon_path = _os.path.join(sys._MEIPASS, 'fuse.ico')
+        else:
+            icon_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '..', 'fuse.ico')
+        if _os.path.exists(icon_path):
+            self.root.iconbitmap(default=icon_path)
+
         self.vehicle: Optional[VehicleConnection] = None
         self._build_menu()
         self._build_ui()
