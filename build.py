@@ -130,6 +130,8 @@ def build():
             "--hidden-import", "modules.ai_chat",
             "--hidden-import", "modules.issues_log",
             "--hidden-import", "modules.machine_id",
+            "--hidden-import", "modules.ai_tools",
+            "--hidden-import", "gui.panels.bus_monitor_panel",
             "--hidden-import", "modules.vehicle_info",
             "--hidden-import", "modules.updater",
             "--hidden-import", "modules.pats",
