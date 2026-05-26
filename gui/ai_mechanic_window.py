@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import (
 
 from modules import issues_log
 from modules.issues_log import Issue
-from modules.ai_chat import MechanicChat, diagnose_config
+from modules.ai_chat import MechanicChat, diagnose_config, using_hosted_proxy, hosted_proxy_url, MODEL
 
 
 # ── colours ─────────────────────────────────────────────────────────────────
@@ -235,6 +235,25 @@ class AIMechanicWindow(QMainWindow):
         self.subtitle = QLabel("Diagnose your vehicle, your adapter, or the app itself")
         self.subtitle.setStyleSheet("color:#aaa;")
         head.addWidget(self.subtitle)
+        head.addSpacing(12)
+        if using_hosted_proxy():
+            mode_text = f"Hosted service · {MODEL}"
+            mode_color = "#55ddaa"
+        else:
+            mode_text = f"Local key · {MODEL}"
+            mode_color = "#ffaa00"
+        self.mode_badge = QLabel(mode_text)
+        self.mode_badge.setStyleSheet(
+            f"color:{mode_color}; background:#1f1f1f; padding:2px 8px; "
+            "border-radius:8px; font-size:8.5pt;"
+        )
+        self.mode_badge.setToolTip(
+            f"Endpoint: {hosted_proxy_url() if using_hosted_proxy() else 'direct upstream'}"
+            "\n\nClick for full configuration diagnostic."
+        )
+        self.mode_badge.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.mode_badge.mousePressEvent = lambda _e: self._open_config_diagnostic()
+        head.addWidget(self.mode_badge)
         head.addStretch(1)
         self.status_label = QLabel("")
         self.status_label.setStyleSheet("color:#ffaa00;")
@@ -394,23 +413,6 @@ class AIMechanicWindow(QMainWindow):
 
     def _start_chat_session(self, vehicle_info: Optional[dict],
                             dtc_data: Optional[list]):
-        if not MechanicChat.is_configured():
-            self._clear_bubbles()
-            self._append_bubble(
-                "error",
-                "AI Mechanic is not configured.\n\n"
-                "Set the environment variable MOD_ANTHROPIC_AUTH_TOKEN "
-                "(or MOD_ANTHROPIC_API_KEY) in Windows system environment, "
-                "then restart Fuse OBD.\n\n"
-                "Optional vars: MOD_ANTHROPIC_BASE_URL, MOD_ANTHROPIC_MODEL, "
-                "MOD_ANTHROPIC_DEFAULT_OPUS_MODEL.\n\n"
-                "Click the 'Show config diagnostic' button below to see "
-                "exactly which variables Fuse OBD can read."
-            )
-            self._show_config_diagnostic_button()
-            self.status_label.setText("Not configured")
-            return
-
         self._clear_bubbles()
         self._append_bubble("system", "Starting AI Mechanic session...")
         self.status_label.setText("Connecting...")
@@ -727,25 +729,47 @@ class _ConfigDiagnosticDialog(QDialog):
         )
 
         lines: list[str] = []
-        for setting, info in diag.items():
-            lines.append("=" * 70)
-            lines.append(f"  {setting}    resolved → {info['resolved']}")
-            lines.append("=" * 70)
-            for row in info["candidates"]:
-                lines.append(f"  {row['name']}")
-                lines.append(f"      process env: {row['in_process_env']}")
-                lines.append(f"      registry:    {row['in_registry']}")
+        mode = diag.get("mode", "?")
+        lines.append("=" * 70)
+        if mode == "hosted-proxy":
+            lines.append("  Mode: HOSTED PROXY (default for end users)")
+            lines.append(f"  Endpoint: {diag.get('hosted_proxy_url','?')}")
+            lines.append("  The real LLM credentials live on the Fuse OBD server.")
+            lines.append("  This client does NOT have or need an API token.")
+        else:
+            lines.append("  Mode: LOCAL OVERRIDE (developer / power user)")
+            lines.append("  A local MOD_ANTHROPIC_* var was found — using it directly,")
+            lines.append("  bypassing the hosted proxy.")
+        lines.append("=" * 70)
+        lines.append("")
+        resolved = diag.get("resolved", {})
+        lines.append(f"  Resolved AUTH_TOKEN: {resolved.get('AUTH_TOKEN','?')}")
+        lines.append(f"  Resolved BASE_URL:   {resolved.get('BASE_URL','?')}")
+        lines.append(f"  Resolved MODEL:      {resolved.get('MODEL','?')}")
+        lines.append("")
+        lines.append("-" * 70)
+        lines.append("Env var candidates checked (local override path)")
+        lines.append("-" * 70)
+        candidates = diag.get("candidates", {})
+        for setting, rows in candidates.items():
             lines.append("")
+            lines.append(f"  {setting}")
+            for row in rows:
+                lines.append(f"    {row['name']}")
+                lines.append(f"        process env: {row['in_process_env']}")
+                lines.append(f"        registry:    {row['in_registry']}")
 
-        # Add a hint about HKCU shadowing HKLM
+        lines.append("")
         lines.append("-" * 70)
         lines.append("Notes:")
-        lines.append("  • Process-env value 'unset' or empty means Windows merged a")
-        lines.append("    user-level (HKCU) blank over the system-level value.")
-        lines.append("  • Fuse OBD now falls back to the Windows registry when the")
-        lines.append("    process env is empty, so the system-level value still wins.")
-        lines.append("  • If everything above is '(unset)', set MOD_ANTHROPIC_AUTH_TOKEN")
-        lines.append("    in System Properties → Environment Variables → System variables.")
+        if mode == "hosted-proxy":
+            lines.append("  • End users don't need any environment variables.")
+            lines.append("  • If chat fails, the Fuse OBD server may be down or unreachable.")
+        else:
+            lines.append("  • Process-env value 'unset'/'empty' means Windows merged an")
+            lines.append("    HKCU (user-level) blank over the HKLM (system) value.")
+            lines.append("  • Fuse OBD now falls back to the Windows registry when the")
+            lines.append("    process env is empty, so the system-level value still wins.")
 
         body.setPlainText("\n".join(lines))
         v.addWidget(body, stretch=1)

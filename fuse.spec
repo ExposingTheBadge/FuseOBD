@@ -16,7 +16,7 @@ a = Analysis(
         'core', 'core.j2534', 'core.protocols', 'core.uds', 'core.vehicle',
         'modules', 'modules.scanner', 'modules.dtc', 'modules.ai_diagnostics', 'modules.ai_chat',
         'modules.vehicle_info', 'modules.updater', 'modules.pats',
-        'modules.issues_log',
+        'modules.issues_log', 'modules.machine_id',
         'anthropic', 'httpx', 'anyio', 'sniffio', 'certifi', 'h11', 'httpcore',
         'modules.asbuilt', 'modules.pid', 'modules.security',
         'utils', 'utils.ford_crypto', 'utils.protection',
