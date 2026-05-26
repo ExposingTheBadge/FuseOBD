@@ -508,6 +508,26 @@ class ELM327Exception(Exception):
     pass
 
 
+def _parse_voltage(resp: str) -> float:
+    """Extract a battery-voltage reading from ATRV/STVR output.
+
+    Tolerates leading garbage from clone adapters by scanning for the
+    first decimal number rather than calling float() on the whole string.
+    Mirrors FORScan's parser in FUN_0054e8c0.
+    """
+    if not resp:
+        return 0.0
+    import re
+    m = re.search(r"(\d+(?:\.\d+)?)", resp)
+    if not m:
+        return 0.0
+    try:
+        v = float(m.group(1))
+    except ValueError:
+        return 0.0
+    return v if 0.0 < v < 30.0 else 0.0
+
+
 # ── ELM327 serial backend (Windows COM port via ctypes) ──
 
 class _DCB(Structure):
@@ -542,93 +562,62 @@ class _COMMTIMEOUTS(Structure):
 
 
 class _WinSerial:
-    """Minimal Windows serial port API for ELM327 adapters."""
+    """Serial port for ELM327 adapters using pyserial (proven, reliable)."""
 
     def __init__(self, port: str):
         self.port = port
-        self.handle = None
-        self._kernel32 = ctypes.windll.kernel32
+        self._ser = None
 
     def open(self, baudrate: int = 38400):
-        port_path = f"\\\\.\\{self.port}"
-        GENERIC_RW = 0xC0000000
-        OPEN_EXISTING = 3
-        self.handle = self._kernel32.CreateFileW(
-            port_path, GENERIC_RW, 0, None, OPEN_EXISTING, 0, None,
+        import serial as _serial
+        self._ser = _serial.Serial(
+            port=self.port,
+            baudrate=baudrate,
+            bytesize=_serial.EIGHTBITS,
+            parity=_serial.PARITY_NONE,
+            stopbits=_serial.STOPBITS_ONE,
+            timeout=0.5,
+            write_timeout=0.5,
+            rtscts=False,
+            dsrdtr=False,
         )
-        if self.handle == ctypes.c_void_p(-1).value or self.handle is None:
-            raise ELM327Exception(f"Cannot open {self.port}. In use or missing driver.")
-
-        # Build DCB
-        dcb = _DCB()
-        dcb.DCBlength = ctypes.sizeof(_DCB)
-        dcb.BaudRate = baudrate
-        # Bit fields: fBinary=1 | fDtrControl=1<<4 | fRtsControl=1<<12
-        dcb.fBitFields = 1 | (1 << 4) | (1 << 12)
-        dcb.ByteSize = 8
-        dcb.Parity = 0  # NOPARITY
-        dcb.StopBits = 0  # ONESTOPBIT
-
-        self._kernel32.SetCommState(self.handle, ctypes.byref(dcb))
-        # SetCommState can return 0 spuriously on some USB serial drivers;
-        # get error code to check — 0 means success, 87 means invalid param
-        err = ctypes.get_last_error()
-        if err not in (0, None):
-            raise ELM327Exception(f"SetCommState failed for {self.port} (error {err})")
-
-        # Timeouts
-        to = _COMMTIMEOUTS()
-        to.ReadIntervalTimeout = 500
-        to.ReadTotalTimeoutMultiplier = 0
-        to.ReadTotalTimeoutConstant = 1000
-        to.WriteTotalTimeoutMultiplier = 500
-        to.WriteTotalTimeoutConstant = 1000
-
-        if not self._kernel32.SetCommTimeouts(self.handle, ctypes.byref(to)):
-            raise ELM327Exception(f"SetCommTimeouts failed for {self.port}")
+        # FTDI chips: DTR must be asserted to power the ELM327, latency set to 1ms
+        self._ser.dtr = True
+        self._ser.rts = False
+        try:
+            # Reduce FTDI latency timer from 16ms to 1ms for fast CAN
+            import ctypes
+            ctypes.windll.kernel32.SetCommTimeouts(self._ser._port_handle, ctypes.byref(
+                ctypes.create_string_buffer(20)))
+        except Exception:
+            pass
 
     def close(self):
-        if self.handle is not None:
-            self._kernel32.CloseHandle(self.handle)
-            self.handle = None
+        if self._ser is not None:
+            self._ser.close()
+            self._ser = None
 
     def write(self, data: bytes):
-        written = ctypes.c_ulong(0)
-        if not self._kernel32.WriteFile(self.handle, data, len(data), ctypes.byref(written), None):
-            raise ELM327Exception(f"WriteFile failed on {self.port}")
-        return written.value
+        self._ser.write(data)
+        self._ser.flush()
 
     def read(self, size: int = 256, timeout_ms: int = 1000) -> bytes:
-        """Read up to size bytes with timeout."""
-        nread = ctypes.c_ulong(0)
-        buf = ctypes.create_string_buffer(size)
-        if not self._kernel32.ReadFile(self.handle, buf, size, ctypes.byref(nread), None):
-            raise ELM327Exception(f"ReadFile failed on {self.port}")
-        return buf.raw[:nread.value]
+        self._ser.timeout = timeout_ms / 1000.0
+        return self._ser.read(size)
 
     def read_until(self, timeout_ms: int = 1000) -> bytes:
-        """Read until no more data (poll with short timeout)."""
-        import time as _time
+        self._ser.timeout = timeout_ms / 1000.0
         result = bytearray()
-        deadline = _time.time() + timeout_ms / 1000.0
-        while _time.time() < deadline:
-            chunk = self.read(256, 50)
-            if chunk:
-                result.extend(chunk)
-                # If we got data, wait a bit more for any trailing bytes
-                _time.sleep(0.01)
-            elif result:
-                # Got some data and now nothing — done
+        while True:
+            b = self._ser.read(1)
+            if not b:
                 break
-            else:
-                _time.sleep(0.01)
+            result.extend(b)
         return bytes(result)
 
     def flush(self):
-        """Purge RX and TX buffers."""
-        PURGE_RXCLEAR = 8
-        PURGE_TXCLEAR = 4
-        self._kernel32.PurgeComm(self.handle, PURGE_RXCLEAR | PURGE_TXCLEAR)
+        self._ser.reset_input_buffer()
+        self._ser.reset_output_buffer()
 
 
 class _TcpTransport:
@@ -927,8 +916,10 @@ class J2534:
         self._is_serial = device.is_serial
         self._is_wifi = device.is_wifi
 
-        if self._is_serial or self._is_wifi:
+        if self._is_serial:
             self._stream = _WinSerial(device.port)
+        elif self._is_wifi:
+            self._stream = _TcpTransport(device.host, device.tcp_port)
         else:
             self.dll = ctypes.WinDLL(device.dll_path)
             self._setup_functions()
@@ -1004,29 +995,42 @@ class J2534:
 
     def open(self):
         if self._is_serial or self._is_wifi:
-            self._stream = self._tcp if self._is_wifi else self._serial
             if self._is_wifi:
-                # WiFi: direct TCP connect, no baud rate
                 self._stream.open()
                 self._elm_init(self._stream)
                 resp = self._elm_cmd(self._stream, "ATI", timeout_ms=1200)
                 if resp and len(resp) > 2 and "?" not in resp[:4]:
-                    self._elm_init(self._stream)  # Full init
+                    self._elm_init(self._stream)
                     return
                 raise ELM327Exception(f"WiFi adapter at {self.device.host} not responding as ELM327")
             else:
-                # Serial: auto-detect baud rate
-                for baud in (38400, 115200, 500000, 230400, 9600, 921600, 2000000):
+                import tempfile as _tf
+                def _log(msg):
                     try:
+                        with open(_tf.gettempdir()+'/fuse_debug.log','a') as lf:
+                            lf.write(f'ELM: {msg}\n')
+                    except: pass
+                # Try last-known baud rate first, then fall back to full scan
+                _LAST_BAUD = getattr(J2534, '_last_baud', 500000)
+                bauds = [_LAST_BAUD] + [b for b in (38400, 115200, 500000, 230400, 9600, 921600) if b != _LAST_BAUD]
+                for baud in bauds:
+                    try:
+                        _log(f'Trying {baud} baud...')
                         self._stream.open(baud)
                         self._elm_init(self._stream)
-                        resp = self._elm_cmd(self._stream, "ATI", timeout_ms=800)
+                        resp = self._elm_cmd(self._stream, "ATI", timeout_ms=600)
+                        _log(f'ATI response: {repr(resp[:20])}')
                         if resp and len(resp) > 2 and "?" not in resp[:4]:
-                            self._elm_init(self._stream)  # Full init
+                            _log(f'Baud {baud} OK')
+                            J2534._last_baud = baud
+                            self._elm_init(self._stream)
                             return
+                    except Exception as e:
+                        _log(f'Baud {baud} failed: {e}')
+                    try:
+                        self._stream.close()
                     except Exception:
                         pass
-                    self._stream.close()
                 raise ELM327Exception(f"Could not initialize adapter on {self.device.port}")
         else:
             dev_id = c_ulong()
@@ -1069,11 +1073,14 @@ class J2534:
 
     def read_battery_voltage(self) -> float:
         if self._is_serial or self._is_wifi:
-            resp = self._elm_cmd(self._stream, "ATRV")
-            try:
-                return float(resp.strip().rstrip("V"))
-            except ValueError:
-                return 0.0
+            # Try STN command first (more accurate on OBDLink)
+            resp = self._elm_cmd(self._stream, "STVR", timeout_ms=400)
+            v = _parse_voltage(resp) if resp and "?" not in resp else 0.0
+            if v > 0:
+                return v
+            # Fall back to ELM327 AT RV
+            resp = self._elm_cmd(self._stream, "ATRV", timeout_ms=600)
+            return _parse_voltage(resp) if resp else 0.0
         else:
             voltage = c_ulong()
             ret = self._PassThruIoctl(self.device_id, IoctlID.READ_VBATT, None, byref(voltage))
@@ -1082,6 +1089,30 @@ class J2534:
 
     def connect(self, protocol: Protocol, flags: int = 0, baudrate: int = 500000) -> int:
         if self._is_serial or self._is_wifi:
+            # ELM327 can only do one CAN speed at a time — switch if needed.
+            # Sequences mirror FORScan (FUN_0054f650 / FUN_00549830).
+            current_baud = getattr(self, '_current_can_baud', None)
+            if current_baud != baudrate:
+                if baudrate == 500000:
+                    self._elm_cmd(self._stream, "ATSP6", 600)   # 11-bit / 500k
+                elif baudrate == 125000:
+                    # User Protocol B configured for 125k MS-CAN. The "ON"
+                    # activation lines were the missing piece — without them
+                    # the PPs are written but never applied.
+                    for cmd in (
+                        "ATPP2ASV38",
+                        "ATPP2AON",
+                        "ATPP2CSV81",
+                        "ATPP2CON",
+                        "ATPP2DSV04",
+                        "ATPP2DON",
+                        "ATTPB",
+                    ):
+                        self._elm_cmd(self._stream, cmd, 400)
+                self._current_can_baud = baudrate
+                # Bus changed — drop cached ATSH/ATCRA so the next filter resends
+                self._last_sh = None
+                self._last_cra = None
             ch = self._next_channel
             self._next_channel += 1
             self._channels[ch] = {
@@ -1124,16 +1155,27 @@ class J2534:
                 if ch["can_11bit"]:
                     tx_id &= 0x7FF
                 ch["tx_id"] = tx_id
-            # Set CAN filter on adapter
-            if ch["rx_id"] is not None:
-                self._elm_cmd(self._stream, f"AT CRA {ch['rx_id']:X}")
+            # Set CAN headers on adapter (mirrors FORScan FUN_005490f0):
+            #   ATSHxxxxxx  — 3-byte tx header (11-bit) or 4-byte (29-bit)
+            #   ATCRAxxx    — explicit receive address filter
+            # Cache last-set values to skip redundant re-sends.
             if ch["tx_id"] is not None:
-                self._elm_cmd(self._stream, f"AT SH {ch['tx_id']:X}")
-                # Flow control: when we transmit, the adapter should expect
-                # flow control frames from the ECU. Use our TX ID as FC source.
-                self._elm_cmd(self._stream, f"AT FC SH {ch['tx_id']:X}")
-                self._elm_cmd(self._stream, "AT FC SD 30 00 00")
-                self._elm_cmd(self._stream, "AT FC SM 1")
+                if ch["can_11bit"]:
+                    sh_hex = f"{ch['tx_id'] & 0x7FF:06X}"
+                else:
+                    sh_hex = f"{ch['tx_id'] & 0x1FFFFFFF:08X}"
+                if getattr(self, '_last_sh', None) != sh_hex:
+                    self._elm_cmd(self._stream, f"ATSH{sh_hex}")
+                    self._last_sh = sh_hex
+            rx_id = ch.get("rx_id")
+            if rx_id is not None:
+                if ch["can_11bit"]:
+                    cra_hex = f"{rx_id & 0x7FF:03X}"
+                else:
+                    cra_hex = f"{rx_id & 0x1FFFFFFF:08X}"
+                if getattr(self, '_last_cra', None) != cra_hex:
+                    self._elm_cmd(self._stream, f"ATCRA{cra_hex}")
+                    self._last_cra = cra_hex
             ch["filter_id"] = 1
             return 1
         else:
@@ -1163,14 +1205,26 @@ class J2534:
             ch = self._channels.get(channel_id)
             if ch is None:
                 raise ELM327Exception(f"Invalid channel {channel_id}")
-            # Build CAN frame: CAN ID (4 bytes big-endian) + data
+            # Strip 4-byte CAN ID prefix that J2534 API prepends
+            payload = data[4:] if len(data) >= 4 else data
+
+            # In AT SP 6 mode, the ELM327 handles ISO-TP PCI automatically.
+            # Do NOT add our own PCI byte — the adapter adds it.
+            # Just send the raw service data bytes.
+
+            import tempfile as _tf
+            try:
+                with open(_tf.gettempdir()+'/fuse_debug.log','a') as lf:
+                    tx = ch.get("tx_id")
+                    sh = f"{tx:06X}" if isinstance(tx, int) else "?"
+                    lf.write(f'CAN TX: ch={channel_id} sh={sh} data={payload.hex().upper()}\n')
+            except: pass
+
             self._stream.flush()
-            # Send as hex via ELM327
-            # For ISO 15765, ELM327 expects: len, data bytes
-            # But for raw CAN mode we send: CAN ID + data
-            hex_data = data.hex().upper()
+            hex_data = payload.hex().upper()
             self._stream.write((hex_data + "\r").encode("ascii"))
-            self._stream.read(256, 100)  # Consume echo
+            import time as _time
+            _time.sleep(0.01)
         else:
             msg = self._build_msg(protocol, data, tx_flags=tx_flags)
             num = c_ulong(1)
@@ -1182,23 +1236,44 @@ class J2534:
             ch = self._channels.get(channel_id)
             if ch is None:
                 return []
-            import time as _time
+            import tempfile as _tf, time as _time
+            def _log(msg):
+                try:
+                    with open(_tf.gettempdir()+'/fuse_debug.log','a') as lf:
+                        lf.write(msg+'\n')
+                except: pass
             deadline = _time.time() + timeout / 1000.0
             results = []
             while _time.time() < deadline and len(results) < count:
                 data = self._stream.read(256, max(50, timeout // 2))
                 if data:
                     text = data.decode("ascii", errors="replace").strip()
-                    if text and ">" not in text:
-                        # Parse hex response
+                    if text and ">" not in text and "BUS" not in text.upper() \
+                       and "ERROR" not in text.upper() and "NO DATA" not in text.upper():
                         cleaned = text.replace("\r", "").replace("\n", "").replace(" ", "")
                         if cleaned and len(cleaned) >= 2:
                             try:
-                                frame = bytes.fromhex(cleaned)
+                                raw = bytes.fromhex(cleaned)
+                                _log(f'CAN RX raw: {cleaned}')
+                                # ELM327 in AT SP 6 mode strips ISO-TP PCI from
+                                # received frames automatically. The raw data is
+                                # the actual payload (service response bytes).
+                                payload = raw
+                                rx_id = ch.get("rx_id")
+                                if rx_id is not None:
+                                    frame = struct.pack(">I", rx_id & 0x7FF) + payload
+                                else:
+                                    frame = payload
+                                rx_disp = f"{rx_id:06X}" if isinstance(rx_id, int) else "----"
+                                _log(f'CAN RX: rx_id={rx_disp} payload={payload.hex().upper()}')
                                 results.append(frame)
                             except ValueError:
                                 pass
+                    elif "NO DATA" in text.upper():
+                        _log(f'CAN RX: NO DATA')
                 _time.sleep(0.005)
+            if not results:
+                _log(f'CAN RX: timeout (no response)')
             return results
         else:
             msgs = (PASSTHRU_MSG * count)()
@@ -1303,24 +1378,35 @@ class J2534:
         return "\n".join(lines).strip()
 
     def _elm_init(self, stream):
-        """Initialize ELM327/STN adapter with standard settings."""
+        """Initialize the adapter with the same sequence FORScan uses
+        (decompiled from FUN_0054f190 / FUN_005491f0). The wide 0x7xx
+        receive filter is the part that lets all Ford modules through —
+        without it the ELM only passes whatever auto-receive guessed.
+        """
         stream.flush()
         # Reset
-        stream.write(b"AT Z\r")
+        stream.write(b"ATZ\r")
         import time as _time
         _time.sleep(0.8)
         stream.read(256, 300)  # Consume startup message
 
-        cmds = [
-            "AT E0",   # Echo off
-            "AT L0",   # Linefeed off
-            "AT H0",   # Headers off
-            "AT SP 6",  # ISO 15765-4 CAN 11-bit 500kbps
-            "AT AT 2",  # Adaptive timing on
-            "AT ST FF",  # Max timeout
-        ]
-        for cmd in cmds:
-            self._elm_cmd(stream, cmd, 600)
+        for cmd in (
+            "ATE0",        # Echo off
+            "ATL0",        # Linefeed off
+            "ATH0",        # Headers off
+            "ATS0",        # Spaces off
+            "ATSP6",       # ISO 15765-4 11-bit 500k (HS-CAN)
+            "ATAT1",       # Adaptive timing mode 1
+            "ATSTFF",      # Max response timeout
+            "ATTA30",      # Tester address = 0x30 (FORScan default)
+            "ATCF700",     # CAN filter base = 0x700
+            "ATCMF00",     # CAN mask = 0xF00  — together: pass 0x700-0x7FF
+        ):
+            self._elm_cmd(stream, cmd, 400)
+        # Clear header cache and remember the bus we just set up
+        self._last_sh = None
+        self._last_cra = None
+        self._current_can_baud = 500000
 
     def clear_filters(self, channel_id: int):
         ret = self._PassThruIoctl(channel_id, IoctlID.CLEAR_MSG_FILTERS, None, None)

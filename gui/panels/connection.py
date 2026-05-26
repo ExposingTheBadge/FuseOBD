@@ -1,110 +1,140 @@
-import tkinter as tk
-from tkinter import ttk, messagebox
-import threading
-from typing import Optional, Callable
-from core.j2534 import J2534, J2534Device, enumerate_devices, PassThruException
+import subprocess
+import tempfile
+import traceback
+from typing import Callable, Optional
+
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import (
+    QComboBox, QDialog, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
+    QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+)
+
+from core.j2534 import J2534, J2534Device, enumerate_devices
+from gui.qt_helpers import BasePanel, run_thread, warn, info, error, confirm
 
 
-class ConnectionPanel(ttk.LabelFrame):
-    def __init__(self, parent, on_connect: Callable, on_disconnect: Callable):
-        super().__init__(parent, text="Connection", padding=10)
-        self.on_connect = on_connect
-        self.on_disconnect = on_disconnect
+def _log(msg: str) -> None:
+    try:
+        with open(tempfile.gettempdir() + "/fuse_debug.log", "a") as f:
+            f.write(msg + "\n")
+    except Exception:
+        pass
+
+
+class ConnectionPanel(BasePanel):
+    def __init__(self, parent: QWidget, on_connect: Callable, on_disconnect: Callable):
+        super().__init__(parent)
+        self.on_connect_cb = on_connect
+        self.on_disconnect_cb = on_disconnect
         self.devices: list[J2534Device] = []
         self.j2534: Optional[J2534] = None
         self.connected = False
         self._build_ui()
-
-    def _build_ui(self):
-        row = ttk.Frame(self)
-        row.pack(fill="x", pady=2)
-
-        ttk.Label(row, text="Adapter:").pack(side="left", padx=(0, 5))
-        self.device_combo = ttk.Combobox(row, state="readonly", width=40)
-        self.device_combo.pack(side="left", padx=(0, 5), fill="x", expand=True)
-
-        self.refresh_btn = ttk.Button(row, text="Refresh", command=self.refresh_devices, width=8)
-        self.refresh_btn.pack(side="left", padx=2)
-
-        self.connect_btn = ttk.Button(row, text="Connect", command=self._toggle_connection, width=10)
-        self.connect_btn.pack(side="left", padx=2)
-
-        # WiFi manual entry row
-        wifi_row = ttk.Frame(self)
-        wifi_row.pack(fill="x", pady=(5, 0))
-        ttk.Label(wifi_row, text="WiFi IP:").pack(side="left", padx=(0, 5))
-        self.wifi_ip_var = tk.StringVar(value="192.168.0.10")
-        self.wifi_ip_entry = ttk.Entry(wifi_row, textvariable=self.wifi_ip_var, width=16)
-        self.wifi_ip_entry.pack(side="left", padx=(0, 5))
-        ttk.Label(wifi_row, text="Port:").pack(side="left", padx=(0, 5))
-        self.wifi_port_var = tk.StringVar(value="35000")
-        self.wifi_port_entry = ttk.Entry(wifi_row, textvariable=self.wifi_port_var, width=6)
-        self.wifi_port_entry.pack(side="left", padx=(0, 5))
-        self.wifi_btn = ttk.Button(wifi_row, text="Add WiFi", command=self._add_wifi_adapter, width=10)
-        self.wifi_btn.pack(side="left", padx=2)
-
-        # Bluetooth button
-        bt_row = ttk.Frame(self)
-        bt_row.pack(fill="x", pady=(5, 0))
-        self.bt_btn = ttk.Button(bt_row, text="Bluetooth Devices", command=self._scan_bluetooth, width=20)
-        self.bt_btn.pack(side="left", padx=2)
-
-        info_row = ttk.Frame(self)
-        info_row.pack(fill="x", pady=2)
-
-        self.status_label = tk.Label(
-            info_row, text="Disconnected", fg="red",
-            font=("Segoe UI", 9, "bold"),
-        )
-        self.status_label.pack(side="left")
-
-        self.voltage_label = ttk.Label(info_row, text="")
-        self.voltage_label.pack(side="right")
-
-        self.version_label = ttk.Label(info_row, text="")
-        self.version_label.pack(side="right", padx=(0, 15))
-
         self.refresh_devices()
 
+    # ── UI ──
+
+    def _build_ui(self):
+        box = QGroupBox("Connection", self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(box)
+        v = QVBoxLayout(box)
+        v.setContentsMargins(10, 12, 10, 10)
+        v.setSpacing(4)
+
+        # Row 1 — adapter selector
+        r1 = QHBoxLayout()
+        r1.addWidget(QLabel("Adapter:"))
+        self.device_combo = QComboBox()
+        self.device_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        r1.addWidget(self.device_combo, stretch=1)
+        self.refresh_btn = QPushButton("Refresh")
+        self.refresh_btn.clicked.connect(self.refresh_devices)
+        r1.addWidget(self.refresh_btn)
+        self.connect_btn = QPushButton("Connect")
+        self.connect_btn.clicked.connect(self._toggle_connection)
+        r1.addWidget(self.connect_btn)
+        v.addLayout(r1)
+
+        # Row 2 — WiFi manual entry
+        r2 = QHBoxLayout()
+        r2.addWidget(QLabel("WiFi IP:"))
+        self.wifi_ip = QLineEdit("192.168.0.10")
+        self.wifi_ip.setFixedWidth(120)
+        r2.addWidget(self.wifi_ip)
+        r2.addWidget(QLabel("Port:"))
+        self.wifi_port = QLineEdit("35000")
+        self.wifi_port.setFixedWidth(70)
+        r2.addWidget(self.wifi_port)
+        self.wifi_btn = QPushButton("Add WiFi")
+        self.wifi_btn.clicked.connect(self._add_wifi_adapter)
+        r2.addWidget(self.wifi_btn)
+        r2.addStretch(1)
+        v.addLayout(r2)
+
+        # Row 3 — Bluetooth
+        r3 = QHBoxLayout()
+        self.bt_btn = QPushButton("Bluetooth Devices")
+        self.bt_btn.clicked.connect(self._scan_bluetooth)
+        r3.addWidget(self.bt_btn)
+        r3.addStretch(1)
+        v.addLayout(r3)
+
+        # Row 4 — status / version / voltage
+        r4 = QHBoxLayout()
+        self.status_label = QLabel("Disconnected")
+        self.status_label.setStyleSheet("color: #ff4444; font-weight: bold;")
+        r4.addWidget(self.status_label)
+        r4.addStretch(1)
+        self.version_label = QLabel("")
+        r4.addWidget(self.version_label)
+        self.voltage_label = QLabel("")
+        self.voltage_label.setStyleSheet("margin-left: 15px;")
+        r4.addWidget(self.voltage_label)
+        v.addLayout(r4)
+
+    # ── Device enumeration ──
+
     def refresh_devices(self):
-        self.devices = enumerate_devices()
-        self._update_combo()
+        try:
+            self.devices = enumerate_devices()
+            self._update_combo()
+            _log(f"REFRESH: found {len(self.devices)} devices")
+        except Exception as e:
+            _log(f"REFRESH ERROR: {e}\n{traceback.format_exc()}")
 
     def _update_combo(self):
-        names = []
+        self.device_combo.clear()
         for d in self.devices:
             if d.is_wifi:
-                names.append(f"{d.name} ({d.host}:{d.tcp_port})")
+                self.device_combo.addItem(f"{d.name} ({d.host}:{d.tcp_port})")
             elif d.is_serial:
-                names.append(f"{d.name} ({d.port})")
+                self.device_combo.addItem(f"{d.name} ({d.port})")
             else:
-                names.append(f"{d.name} ({d.vendor})")
-        self.device_combo["values"] = names
-        if names:
-            self.device_combo.current(0)
+                self.device_combo.addItem(f"{d.name} ({d.vendor})")
+        if self.devices:
+            self.device_combo.setCurrentIndex(0)
 
     def _add_wifi_adapter(self):
-        ip = self.wifi_ip_var.get().strip()
-        port_str = self.wifi_port_var.get().strip()
+        ip = self.wifi_ip.text().strip()
+        port_str = self.wifi_port.text().strip()
         if not ip:
-            messagebox.showerror("Error", "Enter a WiFi IP address")
+            warn(self, "Error", "Enter a WiFi IP address")
             return
         try:
             port = int(port_str) if port_str else 35000
         except ValueError:
             port = 35000
 
-        # Check if already in list
         for d in self.devices:
             if d.host == ip and d.tcp_port == port:
-                # Select it
-                for i, name in enumerate(self.device_combo["values"]):
-                    if ip in name:
-                        self.device_combo.current(i)
+                for i in range(self.device_combo.count()):
+                    if ip in self.device_combo.itemText(i):
+                        self.device_combo.setCurrentIndex(i)
                         return
                 return
 
-        from core.j2534 import J2534Device
         device = J2534Device(
             name=f"WiFi OBD ({ip})",
             vendor="WiFi/ELM327",
@@ -115,21 +145,21 @@ class ConnectionPanel(ttk.LabelFrame):
         )
         self.devices.append(device)
         self._update_combo()
-        self.device_combo.current(len(self.device_combo["values"]) - 1)
+        self.device_combo.setCurrentIndex(self.device_combo.count() - 1)
+
+    # ── Bluetooth scan ──
 
     def _scan_bluetooth(self):
-        """Open a popup listing all paired Bluetooth devices for selection."""
-        self.bt_btn.config(state="disabled", text="Scanning...")
-        # Fetch BT devices in background thread (PowerShell call takes ~2-5s)
-        def fetch():
-            devices = self._list_bluetooth_devices()
-            self.after(0, lambda: self._show_bt_popup(devices))
+        self.bt_btn.setEnabled(False)
+        self.bt_btn.setText("Scanning...")
 
-        threading.Thread(target=fetch, daemon=True).start()
+        def fetch():
+            devs = self._list_bluetooth_devices()
+            self.after(0, lambda: self._show_bt_popup(devs))
+
+        run_thread(fetch)
 
     def _list_bluetooth_devices(self) -> list[tuple[str, str]]:
-        """Return [(name, device_id), ...] for all paired Bluetooth devices."""
-        import subprocess
         ps_cmd = (
             'powershell -NoProfile -Command "'
             '[Windows.Devices.Radios.Radio,Windows.System.Profile,ContentType=WindowsRuntime] | Out-Null;'
@@ -142,7 +172,7 @@ class ConnectionPanel(ttk.LabelFrame):
             '  foreach ($d in $task.Result) { Write-Output \"$($d.Name)|||$($d.Id)\" }'
             '} else { Write-Output \"SCAN_TIMEOUT\" }"'
         )
-        devices = []
+        devices: list[tuple[str, str]] = []
         try:
             result = subprocess.run(ps_cmd, capture_output=True, text=True, timeout=12, shell=True)
             if result.returncode != 0:
@@ -168,127 +198,133 @@ class ConnectionPanel(ttk.LabelFrame):
         return devices
 
     def _show_bt_popup(self, devices: list[tuple[str, str]]):
-        """Show popup with paired BT devices for selection."""
-        self.bt_btn.config(state="normal", text="Bluetooth Devices")
-        popup = tk.Toplevel(self)
-        popup.title("Bluetooth Devices")
-        popup.geometry("500x400")
-        popup.resizable(True, True)
-        popup.transient(self)
-        popup.grab_set()
+        self.bt_btn.setEnabled(True)
+        self.bt_btn.setText("Bluetooth Devices")
 
-        ttk.Label(popup, text="Select a Bluetooth OBD adapter:",
-                  font=("Segoe UI", 11, "bold")).pack(pady=(15, 5), padx=20, anchor="w")
-        ttk.Label(popup, text="Tip: Pair your adapter in Windows Bluetooth settings first",
-                  font=("Segoe UI", 8), foreground="#888888").pack(pady=(0, 5), padx=20, anchor="w")
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Bluetooth Devices")
+        dlg.resize(500, 400)
+        v = QVBoxLayout(dlg)
 
-        # Scrollable list
-        frame = ttk.Frame(popup)
-        frame.pack(fill="both", expand=True, padx=20, pady=5)
-        tree = ttk.Treeview(frame, columns=("name",), show="headings", height=12)
-        tree.heading("name", text="Paired Bluetooth Devices")
-        tree.column("name", width=440)
-        scroll = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
-        tree.configure(yscrollcommand=scroll.set)
-        tree.pack(side="left", fill="both", expand=True)
-        scroll.pack(side="right", fill="y")
+        head = QLabel("Select a Bluetooth OBD adapter:")
+        head.setStyleSheet("font-size: 11pt; font-weight: bold;")
+        v.addWidget(head)
+        v.addWidget(QLabel("Tip: Pair your adapter in Windows Bluetooth settings first"))
 
-        for name, dev_id in devices:
-            tag = "error" if name.startswith("⚠") or name.startswith("No") else "device"
-            tree.insert("", "end", values=(name,), tags=(tag,))
-        tree.tag_configure("error", foreground="#ff4444")
+        tree = QTreeWidget()
+        tree.setHeaderLabels(["Paired Bluetooth Devices"])
+        tree.setColumnWidth(0, 440)
+        v.addWidget(tree, stretch=1)
+        for name, _dev_id in devices:
+            item = QTreeWidgetItem([name])
+            if name.startswith("⚠") or name.startswith("No"):
+                item.setForeground(0, Qt.GlobalColor.red)
+            tree.addTopLevelItem(item)
 
-        def on_select():
-            sel = tree.selection()
-            if not sel:
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        sel_btn = QPushButton("Select")
+        sel_btn.setFixedWidth(110)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setFixedWidth(80)
+        btn_row.addWidget(sel_btn)
+        btn_row.addWidget(cancel_btn)
+        btn_row.addStretch(1)
+        v.addLayout(btn_row)
+
+        def do_select():
+            items = tree.selectedItems()
+            if not items:
                 return
-            name = tree.item(sel[0])["values"][0]
+            name = items[0].text(0)
             if name.startswith("⚠") or name.startswith("No"):
                 return
-            # Check if this BT device has a COM port
-            from core.j2534 import J2534Device
-            bt_com = _find_bt_com_port(name) if "_find_bt_com_port" in dir() else ""
-            if bt_com:
-                device = J2534Device(
-                    name=f"{name} ({bt_com})",
-                    vendor="Bluetooth ELM327",
-                    dll_path=bt_com,
-                    port=bt_com,
-                    is_serial=True,
-                )
-            else:
-                # Device may not have SPP service active — show warning
-                if not messagebox.askyesno("No COM Port",
-                        f"'{name}' does not have a COM port assigned.\n\n"
-                        "Make sure the device is paired AND has 'Serial Port' "
-                        "(SPP) service enabled in Windows Bluetooth settings.\n\n"
-                        "Try unpair and re-pair if needed.\n\n"
-                        "Add it to the list anyway?"):
-                    return
-                device = J2534Device(
-                    name=f"{name} (Bluetooth)",
-                    vendor="Bluetooth ELM327",
-                    dll_path="",
-                    is_serial=False,
-                )
+            device = J2534Device(
+                name=f"{name} (Bluetooth)",
+                vendor="Bluetooth ELM327",
+                dll_path="",
+                is_serial=False,
+            )
             self.devices.append(device)
             self._update_combo()
-            self.device_combo.current(len(self.device_combo["values"]) - 1)
-            popup.destroy()
+            self.device_combo.setCurrentIndex(self.device_combo.count() - 1)
+            dlg.accept()
 
-        ttk.Button(popup, text="Select", command=on_select, width=12).pack(pady=10)
-        ttk.Button(popup, text="Cancel", command=popup.destroy, width=8).pack(pady=(0, 15))
-        tree.bind("<Double-1>", lambda e: on_select())
+        sel_btn.clicked.connect(do_select)
+        cancel_btn.clicked.connect(dlg.reject)
+        tree.itemDoubleClicked.connect(lambda *_: do_select())
+        dlg.exec()
+
+    # ── Connect / disconnect ──
 
     def _toggle_connection(self):
-        if self.connected:
-            self._disconnect()
-        else:
-            self._connect()
+        _log(f"TOGGLE called: connected={self.connected}, devices={len(self.devices)}")
+        try:
+            if self.connected:
+                self._disconnect()
+            else:
+                self._connect()
+        except Exception as e:
+            _log(f"ERROR: {e}\n{traceback.format_exc()}")
+            error(self, "Connection Error", str(e))
 
     def _connect(self):
-        idx = self.device_combo.current()
+        idx = self.device_combo.currentIndex()
         if idx < 0 or idx >= len(self.devices):
-            messagebox.showerror("Error", "Select an adapter first")
+            _log(f"CONNECT ABORT: idx={idx}, len={len(self.devices)}")
+            warn(self, "Error", "Select an adapter first")
             return
 
         device = self.devices[idx]
-        self.connect_btn.config(state="disabled", text="Connecting...")
-        self.refresh_btn.config(state="disabled")
-        self.device_combo.config(state="disabled")
-        self.status_label.config(text="Connecting...", fg="orange")
+        _log(f"CONNECT to: {device.name} port={device.port} serial={device.is_serial}")
+        self.connect_btn.setEnabled(False)
+        self.connect_btn.setText("Connecting...")
+        self.refresh_btn.setEnabled(False)
+        self.device_combo.setEnabled(False)
+        self.status_label.setText("Connecting...")
+        self.status_label.setStyleSheet("color: #ffaa00; font-weight: bold;")
 
         def connect_thread():
+            _log(f"THREAD START: port={device.port} host={device.host}")
             try:
+                _log("Creating J2534...")
                 self.j2534 = J2534(device)
+                _log("J2534 created, opening...")
                 self.j2534.open()
-
+                _log("Open OK, reading version...")
                 fw, dll, api = self.j2534.read_version()
-
+                _log(f"Version: FW={fw} DLL={dll} API={api}")
                 voltage = 0.0
                 try:
                     voltage = self.j2534.read_battery_voltage()
-                except Exception:
-                    voltage = 0.0
+                    _log(f"Voltage: {voltage:.1f}V")
+                except Exception as ve:
+                    _log(f"Voltage error: {ve}")
 
                 def on_connected():
-                    self.version_label.config(text=f"FW: {fw}  API: {api}")
+                    self.version_label.setText(f"FW: {fw}  API: {api}")
                     if voltage > 0:
-                        self.voltage_label.config(text=f"Battery: {voltage:.1f}V")
+                        self.voltage_label.setText(f"Battery: {voltage:.1f}V")
                     self.connected = True
-                    self.connect_btn.config(state="normal", text="Disconnect")
-                    self.status_label.config(text="Connected", fg="green")
-                    self.on_connect(self.j2534)
+                    self.connect_btn.setEnabled(True)
+                    self.connect_btn.setText("Disconnect")
+                    self.status_label.setText("Connected")
+                    self.status_label.setStyleSheet("color: #55ff55; font-weight: bold;")
+                    self.on_connect_cb(self.j2534)
 
                 self.after(0, on_connected)
-
+                _log("Connect success - UI updated")
             except Exception as e:
+                _log(f"CONNECT ERROR: {e}\n{traceback.format_exc()}")
+
                 def on_failed():
-                    self.connect_btn.config(state="normal", text="Connect")
-                    self.refresh_btn.config(state="normal")
-                    self.device_combo.config(state="readonly")
-                    self.status_label.config(text="Disconnected", fg="red")
-                    messagebox.showerror("Connection Failed", str(e))
+                    self.connect_btn.setEnabled(True)
+                    self.connect_btn.setText("Connect")
+                    self.refresh_btn.setEnabled(True)
+                    self.device_combo.setEnabled(True)
+                    self.status_label.setText("Disconnected")
+                    self.status_label.setStyleSheet("color: #ff4444; font-weight: bold;")
+                    error(self, "Connection Failed", str(e))
                     if self.j2534:
                         try:
                             self.j2534.close()
@@ -298,10 +334,10 @@ class ConnectionPanel(ttk.LabelFrame):
 
                 self.after(0, on_failed)
 
-        threading.Thread(target=connect_thread, daemon=True).start()
+        run_thread(connect_thread)
 
     def _disconnect(self):
-        self.on_disconnect()
+        self.on_disconnect_cb()
         if self.j2534:
             try:
                 self.j2534.close()
@@ -309,9 +345,10 @@ class ConnectionPanel(ttk.LabelFrame):
                 pass
             self.j2534 = None
         self.connected = False
-        self.connect_btn.config(text="Connect")
-        self.status_label.config(text="Disconnected", fg="red")
-        self.version_label.config(text="")
-        self.voltage_label.config(text="")
-        self.device_combo.config(state="readonly")
-        self.refresh_btn.config(state="normal")
+        self.connect_btn.setText("Connect")
+        self.status_label.setText("Disconnected")
+        self.status_label.setStyleSheet("color: #ff4444; font-weight: bold;")
+        self.version_label.setText("")
+        self.voltage_label.setText("")
+        self.device_combo.setEnabled(True)
+        self.refresh_btn.setEnabled(True)

@@ -28,7 +28,7 @@ class UDSSession(IntEnum):
     DEFAULT = 0x01
     PROGRAMMING = 0x02
     EXTENDED = 0x03
-    FORD_DIAG = 0x87
+    FORD_DIAG = 0x85
 
 
 class DTCSubFunction(IntEnum):

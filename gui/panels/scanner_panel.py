@@ -1,98 +1,87 @@
-import tkinter as tk
-from tkinter import ttk
-import threading
-from typing import Optional
-from core.vehicle import VehicleConnection, ModuleInfo
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import (
+    QHBoxLayout, QLabel, QProgressBar, QPushButton, QTreeWidget,
+    QTreeWidgetItem, QVBoxLayout, QWidget,
+)
+
+from core.vehicle import ModuleInfo
+from gui.qt_helpers import BasePanel, run_thread
 
 
-class ScannerPanel(ttk.Frame):
-    def __init__(self, parent, get_vehicle: callable):
+class ScannerPanel(BasePanel):
+    def __init__(self, parent: QWidget, get_vehicle):
         super().__init__(parent)
         self.get_vehicle = get_vehicle
         self._build_ui()
 
     def _build_ui(self):
-        toolbar = ttk.Frame(self)
-        toolbar.pack(fill="x", pady=(0, 5))
+        v = QVBoxLayout(self)
+        v.setSpacing(4)
 
-        self.scan_btn = ttk.Button(toolbar, text="Full Scan", command=self._full_scan)
-        self.scan_btn.pack(side="left", padx=2)
+        tb = QHBoxLayout()
+        self.scan_btn = QPushButton("Full Scan")
+        self.scan_btn.clicked.connect(self._full_scan)
+        tb.addWidget(self.scan_btn)
+        self.vin_label = QLabel("VIN: --")
+        self.vin_label.setStyleSheet("font-family: Consolas, monospace; font-size: 11pt; font-weight: bold; margin-left: 15px;")
+        tb.addWidget(self.vin_label)
+        tb.addStretch(1)
+        self.count_label = QLabel("")
+        tb.addWidget(self.count_label)
+        v.addLayout(tb)
 
-        self.vin_label = ttk.Label(toolbar, text="VIN: --", font=("Consolas", 11, "bold"))
-        self.vin_label.pack(side="left", padx=15)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        v.addWidget(self.progress)
 
-        self.count_label = ttk.Label(toolbar, text="")
-        self.count_label.pack(side="right", padx=5)
+        self.status_label = QLabel("Ready")
+        v.addWidget(self.status_label)
 
-        self.progress = ttk.Progressbar(self, mode="determinate")
-        self.progress.pack(fill="x", pady=2)
-
-        self.status_label = ttk.Label(self, text="Ready")
-        self.status_label.pack(fill="x")
-
-        columns = ("abbrev", "name", "address", "network", "part_number", "software", "hardware")
-        self.tree = ttk.Treeview(self, columns=columns, show="headings", height=20)
-
-        self.tree.heading("abbrev", text="Module")
-        self.tree.heading("name", text="Name")
-        self.tree.heading("address", text="Address")
-        self.tree.heading("network", text="Network")
-        self.tree.heading("part_number", text="Part Number")
-        self.tree.heading("software", text="Software")
-        self.tree.heading("hardware", text="Hardware")
-
-        self.tree.column("abbrev", width=60, anchor="center")
-        self.tree.column("name", width=220)
-        self.tree.column("address", width=70, anchor="center")
-        self.tree.column("network", width=80, anchor="center")
-        self.tree.column("part_number", width=140)
-        self.tree.column("software", width=140)
-        self.tree.column("hardware", width=140)
-
-        scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scrollbar.set)
-
-        self.tree.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["Module", "Name", "Address", "Network", "Part Number", "Software", "Hardware"])
+        self.tree.setAlternatingRowColors(True)
+        for col, w in enumerate([60, 220, 70, 80, 140, 140, 140]):
+            self.tree.setColumnWidth(col, w)
+        self.tree.setUniformRowHeights(True)
+        v.addWidget(self.tree, stretch=1)
 
     def _full_scan(self):
         vehicle = self.get_vehicle()
         if not vehicle:
             return
 
-        self.scan_btn.config(state="disabled")
-        self.tree.delete(*self.tree.get_children())
-        self.progress["value"] = 0
+        self.scan_btn.setEnabled(False)
+        self.tree.clear()
+        self.progress.setValue(0)
 
-        def scan_thread():
+        def thread():
             try:
                 vin = vehicle.read_vin()
-                self.after(0, lambda: self.vin_label.config(text=f"VIN: {vin or 'Not found'}"))
+                self.after(0, lambda: self.vin_label.setText(f"VIN: {vin or 'Not found'}"))
 
                 def progress_cb(name, current, total):
-                    pct = (current / total) * 100
-                    self.after(0, lambda: self.progress.config(value=pct))
-                    self.after(0, lambda: self.status_label.config(text=f"Scanning {name}..."))
+                    pct = int((current / total) * 100) if total else 0
+                    self.after(0, lambda: self.progress.setValue(pct))
+                    self.after(0, lambda: self.status_label.setText(f"Scanning {name}..."))
 
                 modules = vehicle.scan_modules(callback=progress_cb)
-
                 self.after(0, lambda: self._populate_results(modules))
-                self.after(0, lambda: self.status_label.config(
-                    text=f"Scan complete. Found {len(modules)} modules."
+                self.after(0, lambda: self.status_label.setText(
+                    f"Scan complete. Found {len(modules)} modules."
                 ))
             except Exception as e:
-                self.after(0, lambda: self.status_label.config(text=f"Error: {e}"))
+                self.after(0, lambda: self.status_label.setText(f"Error: {e}"))
             finally:
-                self.after(0, lambda: self.scan_btn.config(state="normal"))
-                self.after(0, lambda: self.progress.config(value=100))
+                self.after(0, lambda: self.scan_btn.setEnabled(True))
+                self.after(0, lambda: self.progress.setValue(100))
 
-        threading.Thread(target=scan_thread, daemon=True).start()
+        run_thread(thread)
 
     def _populate_results(self, modules: list[ModuleInfo]):
-        self.tree.delete(*self.tree.get_children())
+        self.tree.clear()
         for m in modules:
             network = "HS CAN" if m.module.network.value <= 2 else "MS CAN"
-            self.tree.insert("", "end", values=(
+            item = QTreeWidgetItem([
                 m.module.abbreviation,
                 m.module.name,
                 f"0x{m.module.address:02X}",
@@ -100,5 +89,8 @@ class ScannerPanel(ttk.Frame):
                 m.part_number or "--",
                 m.software_pn or "--",
                 m.hardware_pn or "--",
-            ))
-        self.count_label.config(text=f"{len(modules)} modules found")
+            ])
+            for col in (0, 2, 3):
+                item.setTextAlignment(col, Qt.AlignmentFlag.AlignCenter)
+            self.tree.addTopLevelItem(item)
+        self.count_label.setText(f"{len(modules)} modules found")
