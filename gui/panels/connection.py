@@ -160,42 +160,119 @@ class ConnectionPanel(BasePanel):
         run_thread(fetch)
 
     def _list_bluetooth_devices(self) -> list[tuple[str, str]]:
-        ps_cmd = (
-            'powershell -NoProfile -Command "'
-            '[Windows.Devices.Radios.Radio,Windows.System.Profile,ContentType=WindowsRuntime] | Out-Null;'
-            '[Windows.Devices.Enumeration.DeviceInformation,Windows.Devices.Enumeration,ContentType=WindowsRuntime] | Out-Null;'
-            'Add-Type -AssemblyName System.Runtime.WindowsRuntime;'
-            '$async = [Windows.Devices.Enumeration.DeviceInformation]::FindAllAsync('
-            '[Windows.Devices.Bluetooth.BluetoothDevice]::GetDeviceSelectorFromPairingState($true));'
-            '$task = $async.AsTask(); $task.Wait(5000);'
-            'if ($task.IsCompleted) {'
-            '  foreach ($d in $task.Result) { Write-Output \"$($d.Name)|||$($d.Id)\" }'
-            '} else { Write-Output \"SCAN_TIMEOUT\" }"'
+        """List Bluetooth devices Windows knows about.
+
+        Uses Get-PnpDevice — built into Windows 10/11, always present,
+        no WinRT/admin tricks. We grab two classes:
+
+          * Class 'Bluetooth' — every paired/known BT peripheral
+          * Class 'Ports'     — virtual COM ports (this is what an
+                                ELM327 actually shows up as once it's
+                                paired; the user will pick the COM
+                                port for connecting)
+
+        Both are merged so the user sees BOTH the friendly device name
+        and the COM-port-side entry that they'll actually open.
+        """
+        import base64
+        import os
+
+        # Filtering rules (applied inside PowerShell so noise never leaves
+        # the shell):
+        #   - Skip BTH\*           — Microsoft kernel-level BT stubs
+        #     (RFCOMM TDI, Enumerator, MS_BTHLE, etc.)
+        #   - Skip USB\*           — that's the host radio dongle itself
+        #   - Skip BTHENUM\{...    — per-profile service enumerations on a
+        #                            classic-BT peer (AVRCP, OPP, PAN, PBAP,
+        #                            Headset AG, etc.) — the peer's parent
+        #                            entry (BTHENUM\DEV_<MAC>) is the one
+        #                            we keep
+        #   - Skip BTHLEDEVICE\{0000...
+        #                          — standard BT-SIG GATT services that
+        #                            duplicate per BLE device (GAP/GATT)
+        ps_script = (
+            "$ErrorActionPreference = 'SilentlyContinue'; "
+            "$out = @(); "
+            "Get-PnpDevice -Class Bluetooth | Where-Object { "
+            "  $_.FriendlyName -and "
+            "  -not ($_.InstanceId -like 'BTH\\*') -and "
+            "  -not ($_.InstanceId -like 'USB\\*') -and "
+            "  -not ($_.InstanceId -like 'BTHENUM\\{*') -and "
+            "  -not ($_.InstanceId -like 'BTHLEDEVICE\\{*') "
+            "} | ForEach-Object { $out += \"BT|||$($_.FriendlyName)|||$($_.InstanceId)|||$($_.Status)\" }; "
+            "Get-PnpDevice -Class Ports | Where-Object { "
+            "  $_.InstanceId -like 'BTHENUM*' -or "
+            "  $_.FriendlyName -match 'Bluetooth' -or "
+            "  $_.FriendlyName -match 'OBD' "
+            "} | ForEach-Object { $out += \"PORT|||$($_.FriendlyName)|||$($_.InstanceId)|||$($_.Status)\" }; "
+            "$out -join \"`n\""
         )
-        devices: list[tuple[str, str]] = []
+        encoded = base64.b64encode(ps_script.encode("utf-16-le")).decode("ascii")
+
+        creation_flags = 0
+        if os.name == "nt":
+            creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
         try:
-            result = subprocess.run(ps_cmd, capture_output=True, text=True, timeout=12, shell=True)
-            if result.returncode != 0:
-                return [("⚠ PowerShell error", "")]
-            for line in result.stdout.strip().split("\n"):
-                line = line.strip()
-                if not line or line == "SCAN_TIMEOUT":
-                    continue
-                if "|||" in line:
-                    parts = line.split("|||", 1)
-                    name = parts[0].strip()
-                    dev_id = parts[1].strip() if len(parts) > 1 else ""
-                    if name:
-                        devices.append((name, dev_id))
+            result = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-NonInteractive",
+                 "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
+                capture_output=True, text=True, timeout=15,
+                creationflags=creation_flags,
+            )
         except subprocess.TimeoutExpired:
-            return [("⚠ Scan timed out", "")]
+            _log("BT scan: PowerShell timed out after 15s")
+            return [("⚠ Bluetooth scan timed out (15s)", "")]
         except FileNotFoundError:
-            return [("⚠ PowerShell not available", "")]
+            _log("BT scan: powershell.exe not found on PATH")
+            return [("⚠ PowerShell not found on PATH", "")]
         except Exception as e:
-            return [(f"⚠ Error: {e}", "")]
-        if not devices:
-            return [("No paired Bluetooth devices found", "")]
-        return devices
+            _log(f"BT scan: launch error: {e}")
+            return [(f"⚠ Could not launch PowerShell: {e}", "")]
+
+        if result.returncode != 0:
+            err_msg = (result.stderr or "").strip().splitlines()
+            short = err_msg[0][:120] if err_msg else f"exit {result.returncode}"
+            _log(f"BT scan: PowerShell failed (rc={result.returncode}): {short}")
+            return [(f"⚠ PowerShell error: {short}", "")]
+
+        devices: list[tuple[str, str]] = []
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line or "|||" not in line:
+                continue
+            parts = line.split("|||")
+            if len(parts) < 3:
+                continue
+            kind = parts[0]
+            name = parts[1].strip()
+            inst = parts[2].strip()
+            status = parts[3].strip() if len(parts) > 3 else ""
+            if not name:
+                continue
+            label = name
+            if kind == "PORT":
+                label = f"{name}  [COM-port]"
+            if status and status.upper() not in ("OK", "UNKNOWN", ""):
+                label = f"{label}  [{status}]"
+            devices.append((label, inst))
+
+        # De-dupe while preserving order.
+        seen = set()
+        unique: list[tuple[str, str]] = []
+        for d in devices:
+            key = d[0].lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(d)
+
+        if not unique:
+            _log("BT scan: no Bluetooth devices reported by Get-PnpDevice")
+            return [("No paired Bluetooth devices found "
+                     "(pair your adapter in Windows Bluetooth settings first)", "")]
+        _log(f"BT scan: found {len(unique)} Bluetooth/related device(s)")
+        return unique
 
     def _show_bt_popup(self, devices: list[tuple[str, str]]):
         self.bt_btn.setEnabled(True)
