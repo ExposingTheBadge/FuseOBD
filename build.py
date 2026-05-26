@@ -83,7 +83,7 @@ VSVersionInfo(
         StringStruct(u'FileDescription', u'{app_name} - {app_desc}'),
         StringStruct(u'FileVersion', u'{ver}'),
         StringStruct(u'InternalName', u'FuseOBD'),
-        StringStruct(u'LegalCopyright', u'Copyright (c) 2026 Brent Gordon - MIT License'),
+        StringStruct(u'LegalCopyright', u'Copyright (C) 2026 Brent Gordon - GPL-3.0-or-later'),
         StringStruct(u'OriginalFilename', u'FuseOBD.exe'),
         StringStruct(u'ProductName', u'{app_name}'),
         StringStruct(u'ProductVersion', u'{ver}')])

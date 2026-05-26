@@ -28,19 +28,20 @@ from modules.updater import check_async, UpdateInfo
 AUTHOR = "Brent Gordon"
 HOMEPAGE = "https://fuse-obd.com"
 LICENSE_TEXT = (
-    "MIT License\n\n"
-    f"Copyright (c) 2026 {AUTHOR}\n\n"
-    "Permission is hereby granted, free of charge, to any person obtaining a copy "
-    "of this software and associated documentation files (the \"Software\"), to deal "
-    "in the Software without restriction, including without limitation the rights "
-    "to use, copy, modify, merge, publish, distribute, sublicense, and/or sell "
-    "copies of the Software, and to permit persons to whom the Software is "
-    "furnished to do so, subject to the following conditions:\n\n"
-    "The above copyright notice and this permission notice shall be included in all "
-    "copies or substantial portions of the Software.\n\n"
-    "THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR "
-    "IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, "
-    "FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT."
+    f"Fuse OBD — {APP_DESC}\n"
+    f"Copyright (C) 2026 {AUTHOR}\n\n"
+    "This program is free software: you can redistribute it and/or modify "
+    "it under the terms of the GNU General Public License as published by "
+    "the Free Software Foundation, either version 3 of the License, or "
+    "(at your option) any later version.\n\n"
+    "This program is distributed in the hope that it will be useful, "
+    "but WITHOUT ANY WARRANTY; without even the implied warranty of "
+    "MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the "
+    "GNU General Public License for more details.\n\n"
+    "You should have received a copy of the GNU General Public License "
+    "along with this program. If not, see <https://www.gnu.org/licenses/>.\n\n"
+    "This program incorporates PyQt6, which is licensed under the GNU GPL v3. "
+    "The full GPL-3.0 text is bundled with this application in the LICENSE file."
 )
 
 
@@ -134,7 +135,7 @@ class FuseMainWindow(QMainWindow):
         layout.addWidget(self.notebook, stretch=1)
         self.setCentralWidget(central)
 
-        self.global_status = QLabel(f"{APP_NAME} v{VERSION} — Free and open source (MIT License)")
+        self.global_status = QLabel(f"{APP_NAME} v{VERSION} — Free and open source (GPL-3.0)")
         status_bar = QStatusBar(self)
         status_bar.addWidget(self.global_status, 1)
         self.setStatusBar(status_bar)
@@ -279,7 +280,7 @@ class FuseMainWindow(QMainWindow):
         creator.setAlignment(Qt.AlignmentFlag.AlignCenter)
         v.addWidget(creator)
 
-        lic = QLabel("Free and open source — MIT License")
+        lic = QLabel("Free and open source — GNU GPL v3")
         lic.setStyleSheet("color: #2070c0;")
         lic.setAlignment(Qt.AlignmentFlag.AlignCenter)
         v.addWidget(lic)

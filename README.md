@@ -43,6 +43,8 @@ Output: `dist/FuseOBD-v{VERSION}.exe`
 
 ## License
 
-MIT License — see [LICENSE](LICENSE)
+GNU General Public License v3.0 or later — see [LICENSE](LICENSE).
+
+Fuse OBD links against [PyQt6](https://riverbankcomputing.com/software/pyqt/), which is licensed under the GPL v3. The combined work is distributed under the GPL v3 accordingly.
 
 No affiliation with Ford Motor Company.
