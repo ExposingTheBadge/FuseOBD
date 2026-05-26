@@ -598,12 +598,24 @@ class _WinSerial:
             self._ser = None
 
     def write(self, data: bytes):
+        try:
+            from modules import issues_log as _il
+            _il.log_tx(f"SERIAL {getattr(self, 'port', '?')}", data)
+        except Exception:
+            pass
         self._ser.write(data)
         self._ser.flush()
 
     def read(self, size: int = 256, timeout_ms: int = 1000) -> bytes:
         self._ser.timeout = timeout_ms / 1000.0
-        return self._ser.read(size)
+        data = self._ser.read(size)
+        if data:
+            try:
+                from modules import issues_log as _il
+                _il.log_rx(f"SERIAL {getattr(self, 'port', '?')}", data)
+            except Exception:
+                pass
+        return data
 
     def read_until(self, timeout_ms: int = 1000) -> bytes:
         self._ser.timeout = timeout_ms / 1000.0
@@ -613,7 +625,14 @@ class _WinSerial:
             if not b:
                 break
             result.extend(b)
-        return bytes(result)
+        data = bytes(result)
+        if data:
+            try:
+                from modules import issues_log as _il
+                _il.log_rx(f"SERIAL {getattr(self, 'port', '?')}", data)
+            except Exception:
+                pass
+        return data
 
     def flush(self):
         self._ser.reset_input_buffer()
@@ -648,14 +667,26 @@ class _TcpTransport:
             self._sock = None
 
     def write(self, data: bytes):
+        try:
+            from modules import issues_log as _il
+            _il.log_tx(f"TCP {self.host}:{self.port}", data)
+        except Exception:
+            pass
         self._sock.sendall(data)
 
     def read(self, size: int = 256, timeout_ms: int = 1000) -> bytes:
         self._sock.settimeout(timeout_ms / 1000.0)
         try:
-            return self._sock.recv(size)
+            data = self._sock.recv(size)
         except OSError:
             return b""
+        if data:
+            try:
+                from modules import issues_log as _il
+                _il.log_rx(f"TCP {self.host}:{self.port}", data)
+            except Exception:
+                pass
+        return data
 
     def read_until(self, timeout_ms: int = 1000) -> bytes:
         import time as _time
@@ -673,7 +704,14 @@ class _TcpTransport:
                 if result:
                     break
                 _time.sleep(0.01)
-        return bytes(result)
+        data = bytes(result)
+        if data:
+            try:
+                from modules import issues_log as _il
+                _il.log_rx(f"TCP {self.host}:{self.port}", data)
+            except Exception:
+                pass
+        return data
 
     def flush(self):
         # Drain any pending data
@@ -1004,12 +1042,12 @@ class J2534:
                     return
                 raise ELM327Exception(f"WiFi adapter at {self.device.host} not responding as ELM327")
             else:
-                import tempfile as _tf
                 def _log(msg):
                     try:
-                        with open(_tf.gettempdir()+'/fuse_debug.log','a') as lf:
-                            lf.write(f'ELM: {msg}\n')
-                    except: pass
+                        from modules import issues_log as _il
+                        _il.log_adapter(f"ELM: {msg}")
+                    except Exception:
+                        pass
                 # Try last-known baud rate first, then fall back to full scan
                 _LAST_BAUD = getattr(J2534, '_last_baud', 500000)
                 bauds = [_LAST_BAUD] + [b for b in (38400, 115200, 500000, 230400, 9600, 921600) if b != _LAST_BAUD]
@@ -1212,13 +1250,15 @@ class J2534:
             # Do NOT add our own PCI byte — the adapter adds it.
             # Just send the raw service data bytes.
 
-            import tempfile as _tf
             try:
-                with open(_tf.gettempdir()+'/fuse_debug.log','a') as lf:
-                    tx = ch.get("tx_id")
-                    sh = f"{tx:06X}" if isinstance(tx, int) else "?"
-                    lf.write(f'CAN TX: ch={channel_id} sh={sh} data={payload.hex().upper()}\n')
-            except: pass
+                from modules import issues_log as _il
+                tx = ch.get("tx_id")
+                sh = f"{tx:06X}" if isinstance(tx, int) else "?"
+                _il.log_protocol(
+                    f"CAN TX  ch={channel_id} sh={sh} data={payload.hex().upper()} ({len(payload)}B)"
+                )
+            except Exception:
+                pass
 
             self._stream.flush()
             hex_data = payload.hex().upper()
@@ -1236,12 +1276,13 @@ class J2534:
             ch = self._channels.get(channel_id)
             if ch is None:
                 return []
-            import tempfile as _tf, time as _time
+            import time as _time
             def _log(msg):
                 try:
-                    with open(_tf.gettempdir()+'/fuse_debug.log','a') as lf:
-                        lf.write(msg+'\n')
-                except: pass
+                    from modules import issues_log as _il
+                    _il.log_protocol(msg)
+                except Exception:
+                    pass
             deadline = _time.time() + timeout / 1000.0
             results = []
             while _time.time() < deadline and len(results) < count:
