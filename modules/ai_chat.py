@@ -11,10 +11,13 @@ All AI credentials are read from MOD_-prefixed environment variables so the
 AI Mechanic is configured independently from any other Anthropic clients in
 the application:
 
-    MOD_AUTH_TOKEN          – primary API key (fallback: MOD_API_KEY)
-    MOD_BASE_URL            – optional custom base URL
-    MOD_MODEL               – override model id
-    MOD_DEFAULT_OPUS_MODEL  – default model (fallback)
+    MOD_ANTHROPIC_AUTH_TOKEN          – primary API key
+    MOD_ANTHROPIC_API_KEY             – fallback
+    MOD_ANTHROPIC_BASE_URL            – optional custom base URL
+    MOD_ANTHROPIC_MODEL               – override model id
+    MOD_ANTHROPIC_DEFAULT_OPUS_MODEL  – default model (fallback)
+
+Short aliases (MOD_AUTH_TOKEN / MOD_BASE_URL / MOD_MODEL) are also accepted.
 """
 from __future__ import annotations
 
@@ -37,16 +40,31 @@ from modules import issues_log
 
 # ── Configuration ──────────────────────────────────────────────────────────
 
-AUTH_TOKEN = (
-    os.environ.get("MOD_AUTH_TOKEN")
-    or os.environ.get("MOD_API_KEY")
-    or ""
+
+def _env_first(*names: str, default: str = "") -> str:
+    for n in names:
+        v = os.environ.get(n)
+        if v:
+            return v
+    return default
+
+
+AUTH_TOKEN = _env_first(
+    "MOD_ANTHROPIC_AUTH_TOKEN",
+    "MOD_ANTHROPIC_API_KEY",
+    "MOD_AUTH_TOKEN",
+    "MOD_API_KEY",
 )
-BASE_URL = os.environ.get("MOD_BASE_URL", "")
-MODEL = (
-    os.environ.get("MOD_MODEL")
-    or os.environ.get("MOD_DEFAULT_OPUS_MODEL")
-    or "claude-opus-4-7"
+BASE_URL = _env_first(
+    "MOD_ANTHROPIC_BASE_URL",
+    "MOD_BASE_URL",
+)
+MODEL = _env_first(
+    "MOD_ANTHROPIC_MODEL",
+    "MOD_ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "MOD_MODEL",
+    "MOD_DEFAULT_OPUS_MODEL",
+    default="claude-opus-4-7",
 )
 
 
@@ -416,8 +434,8 @@ class MechanicChat:
         if self._client is None:
             if not AUTH_TOKEN:
                 raise RuntimeError(
-                    "No AI auth token configured. Set MOD_AUTH_TOKEN "
-                    "(or MOD_API_KEY) in Windows system environment variables."
+                    "No AI auth token configured. Set MOD_ANTHROPIC_AUTH_TOKEN "
+                    "(or MOD_ANTHROPIC_API_KEY) in Windows system environment variables."
                 )
             kwargs = {"api_key": AUTH_TOKEN, "timeout": 120.0}
             if BASE_URL:

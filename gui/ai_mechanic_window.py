@@ -399,9 +399,11 @@ class AIMechanicWindow(QMainWindow):
             self._append_bubble(
                 "error",
                 "AI Mechanic is not configured.\n\n"
-                "Set the environment variable MOD_AUTH_TOKEN (or MOD_API_KEY) "
-                "in Windows system environment, then restart Fuse OBD.\n\n"
-                "Optional vars: MOD_BASE_URL, MOD_MODEL."
+                "Set the environment variable MOD_ANTHROPIC_AUTH_TOKEN "
+                "(or MOD_ANTHROPIC_API_KEY) in Windows system environment, "
+                "then restart Fuse OBD.\n\n"
+                "Optional vars: MOD_ANTHROPIC_BASE_URL, MOD_ANTHROPIC_MODEL, "
+                "MOD_ANTHROPIC_DEFAULT_OPUS_MODEL."
             )
             self.status_label.setText("Not configured")
             return
