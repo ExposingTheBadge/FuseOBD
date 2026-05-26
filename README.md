@@ -23,7 +23,7 @@ Windows 10/11 x64 required. No installation — just run the exe.
 
 - Windows 10/11 (x64)
 - J2534-compatible adapter (VCM2, VXDIAG, Tactrix, etc.)
-- AI Mechanic reads its credentials from `MOD_AUTH_TOKEN` (or `MOD_API_KEY`) in Windows system environment variables. Optional: `MOD_BASE_URL`, `MOD_MODEL` (defaults to `claude-opus-4-7`)
+- AI Mechanic reads its credentials from `MOD_ANTHROPIC_AUTH_TOKEN` (or `MOD_ANTHROPIC_API_KEY`) in Windows system environment variables. Optional: `MOD_ANTHROPIC_BASE_URL`, `MOD_ANTHROPIC_MODEL` (defaults to `MOD_ANTHROPIC_DEFAULT_OPUS_MODEL`, then `claude-opus-4-7`)
 
 ## Running from Source
 
