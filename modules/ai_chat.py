@@ -687,7 +687,7 @@ class MechanicChat:
             return _log_issue(params)
         return f"Unknown tool: {name}"
 
-    def _run_tool_loop(self, max_turns: int = 8) -> str:
+    def _run_tool_loop(self, max_turns: int = 12) -> str:
         current_messages = list(self.messages)
         text_blocks: list[str] = []
 
@@ -714,10 +714,27 @@ class MechanicChat:
                 return final_text
 
             if tool_uses:
+                # DeepSeek's `[1m]` (1M-context, thinking-mode) variant returns
+                # `thinking` blocks alongside text/tool_use. Those MUST be
+                # echoed back verbatim on every subsequent turn or the API
+                # rejects the request with "content[].thinking ... must be
+                # passed back to the API." Preserve every block type by
+                # cloning the SDK's native pydantic dump.
                 assistant_content = []
                 for b in response.content:
                     if b.type == "text":
                         assistant_content.append({"type": "text", "text": b.text})
+                    elif b.type == "thinking":
+                        block = {"type": "thinking", "thinking": getattr(b, "thinking", "")}
+                        sig = getattr(b, "signature", None)
+                        if sig:
+                            block["signature"] = sig
+                        assistant_content.append(block)
+                    elif b.type == "redacted_thinking":
+                        assistant_content.append({
+                            "type": "redacted_thinking",
+                            "data": getattr(b, "data", ""),
+                        })
                     elif b.type == "tool_use":
                         assistant_content.append({
                             "type": "tool_use",
