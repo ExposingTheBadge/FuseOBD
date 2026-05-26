@@ -1,201 +1,176 @@
-import tkinter as tk
-from tkinter import ttk, messagebox
-import threading
 import webbrowser
 
-from core.vehicle import VehicleConnection
-from core.protocols import FORD_MODULES, FordModule
-from modules.dtc import DTCReader, DTC, ModuleDTCs
-from modules.vehicle_info import decode_vin, format_vehicle_summary, get_vehicle_image_url
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QBrush, QColor, QFont
+from PyQt6.QtWidgets import (
+    QHBoxLayout, QLabel, QLineEdit, QProgressBar, QPushButton, QSplitter,
+    QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+)
+
+from core.protocols import FORD_MODULES
+from modules.dtc import DTCReader, ModuleDTCs
+from modules.vehicle_info import decode_vin, get_vehicle_image_url
 from data.dtc_definitions import lookup_dtc
+from gui.qt_helpers import BasePanel, run_thread, confirm
 
 
-class DTCPanel(ttk.Frame):
-    def __init__(self, parent, get_vehicle: callable):
+class DTCPanel(BasePanel):
+    def __init__(self, parent: QWidget, get_vehicle):
         super().__init__(parent)
         self.get_vehicle = get_vehicle
         self.all_dtcs: list[ModuleDTCs] = []
         self.vehicle_info: dict = {}
-        self.chat = None  # MechanicChat instance
-        self.photo = None  # Keep reference to prevent GC
+        self.chat = None
+        self._vehicle_image_url: str | None = None
         self._build_ui()
 
-    # ═══════════════════════════════════════════════════════════════
-    # UI Construction
-    # ═══════════════════════════════════════════════════════════════
+    # ───────────────────────── UI ─────────────────────────
 
     def _build_ui(self):
+        v = QVBoxLayout(self)
+
         # Toolbar
-        toolbar = ttk.Frame(self)
-        toolbar.pack(fill="x", pady=(0, 5))
+        tb = QHBoxLayout()
+        self.read_btn = QPushButton("Read All Faults")
+        self.read_btn.clicked.connect(self._read_all)
+        tb.addWidget(self.read_btn)
 
-        self.read_btn = ttk.Button(toolbar, text="Read All Faults", command=self._read_all)
-        self.read_btn.pack(side="left", padx=2)
+        self.clear_btn = QPushButton("Clear All Faults")
+        self.clear_btn.clicked.connect(self._clear_all)
+        tb.addWidget(self.clear_btn)
 
-        self.clear_btn = ttk.Button(toolbar, text="Clear All Faults", command=self._clear_all)
-        self.clear_btn.pack(side="left", padx=2)
+        self.ai_btn = QPushButton("AI Mechanic")
+        self.ai_btn.clicked.connect(self._start_ai_session)
+        self.ai_btn.setEnabled(False)
+        tb.addWidget(self.ai_btn)
 
-        self.ai_btn = ttk.Button(toolbar, text="AI Mechanic", command=self._start_ai_session)
-        self.ai_btn.pack(side="left", padx=(15, 2))
-        self.ai_btn.config(state="disabled")
+        self.progress = QProgressBar()
+        self.progress.setFixedWidth(150)
+        tb.addWidget(self.progress)
+        tb.addStretch(1)
+        self.count_label = QLabel("")
+        tb.addWidget(self.count_label)
+        v.addLayout(tb)
 
-        self.progress = ttk.Progressbar(toolbar, mode="determinate", length=150)
-        self.progress.pack(side="left", padx=10)
+        self.status_label = QLabel("Ready")
+        v.addWidget(self.status_label)
 
-        self.count_label = ttk.Label(toolbar, text="")
-        self.count_label.pack(side="right")
+        # Main split
+        main_split = QSplitter(Qt.Orientation.Horizontal)
+        v.addWidget(main_split, stretch=1)
 
-        self.status_label = ttk.Label(self, text="Ready")
-        self.status_label.pack(fill="x")
+        # ── Left ──
+        left = QWidget()
+        left_v = QVBoxLayout(left)
+        left_v.setContentsMargins(0, 0, 0, 0)
 
-        # Main horizontal split: left (tree+chat) | right (vehicle)
-        main_pane = ttk.PanedWindow(self, orient="horizontal")
-        main_pane.pack(fill="both", expand=True)
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["Module", "Code", "Description", "Status", "Details"])
+        self.tree.setAlternatingRowColors(True)
+        for col, w in enumerate([60, 70, 220, 65, 180]):
+            self.tree.setColumnWidth(col, w)
+        left_v.addWidget(self.tree, stretch=2)
 
-        # ── LEFT SIDE ──
-        left_frame = ttk.Frame(main_pane)
+        chat_header = QHBoxLayout()
+        chat_header.addWidget(self._bold("AI Mechanic Chat"))
+        chat_header.addStretch(1)
+        self.chat_status = QLabel("")
+        chat_header.addWidget(self.chat_status)
+        left_v.addLayout(chat_header)
 
-        # Fault tree
-        tree_frame = ttk.Frame(left_frame)
-        columns = ("module", "code", "description", "status", "flags")
-        self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=8)
+        self.chat_text = QTextEdit()
+        self.chat_text.setReadOnly(True)
+        self.chat_text.setStyleSheet("background-color: #1a1a1a; color: #e0e0e0; border: 1px solid #444;")
+        left_v.addWidget(self.chat_text, stretch=1)
 
-        self.tree.heading("module", text="Module")
-        self.tree.heading("code", text="Code")
-        self.tree.heading("description", text="Description")
-        self.tree.heading("status", text="Status")
-        self.tree.heading("flags", text="Details")
+        input_row = QHBoxLayout()
+        self.chat_input = QLineEdit()
+        self.chat_input.returnPressed.connect(self._send_chat)
+        self.chat_input.setEnabled(False)
+        input_row.addWidget(self.chat_input)
+        self.send_btn = QPushButton("Send")
+        self.send_btn.setFixedWidth(80)
+        self.send_btn.clicked.connect(self._send_chat)
+        input_row.addWidget(self.send_btn)
+        left_v.addLayout(input_row)
 
-        self.tree.column("module", width=60)
-        self.tree.column("code", width=70, anchor="center")
-        self.tree.column("description", width=200)
-        self.tree.column("status", width=65, anchor="center")
-        self.tree.column("flags", width=180)
+        main_split.addWidget(left)
 
-        self.tree.tag_configure("active", foreground="#ff4444")
-        self.tree.tag_configure("pending", foreground="#ffaa00")
-        self.tree.tag_configure("stored", foreground="#999999")
-        self.tree.tag_configure("root_cause", foreground="#ff4444", font=("Segoe UI", 9, "bold"))
-        self.tree.tag_configure("cascade", foreground="#ff8800")
-        self.tree.tag_configure("isolated", foreground="#44aaff")
+        # ── Right (vehicle info) ──
+        right = QWidget()
+        right.setFixedWidth(320)
+        right_v = QVBoxLayout(right)
+        right_v.setContentsMargins(0, 0, 0, 0)
 
-        tree_scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=tree_scroll.set)
-        self.tree.pack(side="left", fill="both", expand=True)
-        tree_scroll.pack(side="right", fill="y")
-        tree_frame.pack(fill="both", expand=True, padx=(0, 0))
+        self.vehicle_image_label = QLabel(
+            "Vehicle Image\n\nConnect & scan a vehicle\nto look up photos"
+        )
+        self.vehicle_image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.vehicle_image_label.setStyleSheet(
+            "background-color: #1a1a1a; color: #888; padding: 20px; border: 1px solid #444;"
+        )
+        self.vehicle_image_label.setFixedHeight(200)
+        self.vehicle_image_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.vehicle_image_label.mousePressEvent = lambda _e: self._open_vehicle_url()
+        right_v.addWidget(self.vehicle_image_label)
 
-        # Chat area
-        chat_frame = ttk.Frame(left_frame)
-        chat_header = ttk.Frame(chat_frame)
-        chat_header.pack(fill="x")
-        ttk.Label(chat_header, text="AI Mechanic Chat", font=("Segoe UI", 10, "bold")).pack(side="left", padx=5, pady=(5, 0))
-        self.chat_status = ttk.Label(chat_header, text="", font=("Segoe UI", 9))
-        self.chat_status.pack(side="right", padx=5, pady=(5, 0))
+        head = QHBoxLayout()
+        head.addWidget(self._bold("Vehicle Information"))
+        head.addStretch(1)
+        self.vin_label = QLabel("")
+        self.vin_label.setStyleSheet("font-family: Consolas, monospace; color: #888;")
+        head.addWidget(self.vin_label)
+        right_v.addLayout(head)
 
-        self.chat_text = tk.Text(chat_frame, wrap="word", font=("Segoe UI", 10), padx=10, pady=10,
-                                 bg="#1a1a1a", fg="#e0e0e0", height=8, state="disabled",
-                                 relief="flat", borderwidth=0)
-        chat_scroll = ttk.Scrollbar(chat_frame, orient="vertical", command=self.chat_text.yview)
-        self.chat_text.configure(yscrollcommand=chat_scroll.set)
-        self.chat_text.pack(side="left", fill="both", expand=True, padx=(5, 0), pady=5)
-        chat_scroll.pack(side="right", fill="y", padx=(0, 5), pady=5)
+        self.vehicle_info_text = QTextEdit()
+        self.vehicle_info_text.setReadOnly(True)
+        self.vehicle_info_text.setStyleSheet("background-color: #1a1a1a; color: #e0e0e0; border: 1px solid #444;")
+        right_v.addWidget(self.vehicle_info_text, stretch=1)
 
-        self.chat_text.tag_configure("mechanic", foreground="#ff8800", font=("Segoe UI", 10, "bold"))
-        self.chat_text.tag_configure("user", foreground="#44aaff", font=("Segoe UI", 10, "bold"))
-        self.chat_text.tag_configure("system", foreground="#888888", font=("Segoe UI", 9, "italic"))
-        self.chat_text.tag_configure("error", foreground="#ff4444")
+        main_split.addWidget(right)
+        main_split.setStretchFactor(0, 3)
+        main_split.setStretchFactor(1, 1)
 
-        # Chat input
-        input_frame = ttk.Frame(chat_frame)
-        input_frame.pack(fill="x", padx=5, pady=(0, 5))
-        self.chat_input = ttk.Entry(input_frame)
-        self.chat_input.pack(side="left", fill="x", expand=True)
-        self.chat_input.bind("<Return>", lambda e: self._send_chat())
-        self.chat_input.config(state="disabled")
-        ttk.Button(input_frame, text="Send", command=self._send_chat, width=8).pack(side="right", padx=(5, 0))
+    @staticmethod
+    def _bold(text: str) -> QLabel:
+        lbl = QLabel(text)
+        f = QFont()
+        f.setBold(True)
+        lbl.setFont(f)
+        return lbl
 
-        left_frame.pack(fill="both", expand=True)
-        main_pane.add(left_frame, weight=3)
-
-        # ── RIGHT SIDE (Vehicle Info) ──
-        right_frame = ttk.Frame(main_pane, width=320)
-        right_frame.pack_propagate(False)
-
-        # Vehicle image — clickable link that opens in browser
-        img_frame = ttk.Frame(right_frame, height=200, width=300)
-        img_frame.pack_propagate(False)
-        img_frame.pack(fill="x", padx=10, pady=(10, 5))
-        self.vehicle_image_label = tk.Label(img_frame,
-            text="Vehicle Image\n\nConnect & scan a vehicle\nto look up photos",
-            anchor="center", bg="#1a1a1a", fg="#888888",
-            font=("Segoe UI", 9), cursor="hand2", relief="flat")
-        self.vehicle_image_label.pack(fill="both", expand=True)
-        self._vehicle_image_url = None
-
-        # Vehicle info text
-        info_header = ttk.Frame(right_frame)
-        info_header.pack(fill="x", padx=10)
-        ttk.Label(info_header, text="Vehicle Information", font=("Segoe UI", 10, "bold")).pack(side="left")
-        self.vin_label = ttk.Label(info_header, text="", font=("Consolas", 9), foreground="#888888")
-        self.vin_label.pack(side="right")
-
-        self.vehicle_info_text = tk.Text(right_frame, wrap="word", font=("Segoe UI", 9), padx=10, pady=10,
-                                         bg="#1a1a1a", fg="#e0e0e0", height=14, state="disabled",
-                                         relief="flat", borderwidth=0)
-        info_scroll = ttk.Scrollbar(right_frame, orient="vertical", command=self.vehicle_info_text.yview)
-        self.vehicle_info_text.configure(yscrollcommand=info_scroll.set)
-        self.vehicle_info_text.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=5)
-        info_scroll.pack(side="right", fill="y", padx=(0, 10), pady=5)
-
-        # Info text tags
-        self.vehicle_info_text.tag_configure("heading", font=("Segoe UI", 11, "bold"), foreground="#ff8800")
-        self.vehicle_info_text.tag_configure("label", font=("Segoe UI", 9, "bold"), foreground="#cc6600")
-        self.vehicle_info_text.tag_configure("value", font=("Segoe UI", 9))
-        self.vehicle_info_text.tag_configure("loading", font=("Segoe UI", 9, "italic"), foreground="#888888")
-
-        right_frame.pack(fill="both", expand=False)
-        main_pane.add(right_frame, weight=1)
-
-    # ═══════════════════════════════════════════════════════════════
-    # Fault Reading
-    # ═══════════════════════════════════════════════════════════════
+    # ───────────────────────── Fault reading ─────────────────────────
 
     def _read_all(self):
         vehicle = self.get_vehicle()
         if not vehicle:
             return
 
-        self.read_btn.config(state="disabled")
-        self.clear_btn.config(state="disabled")
-        self.ai_btn.config(state="disabled")
-        self.tree.delete(*self.tree.get_children())
-        self.progress["value"] = 0
+        self.read_btn.setEnabled(False)
+        self.clear_btn.setEnabled(False)
+        self.ai_btn.setEnabled(False)
+        self.tree.clear()
+        self.progress.setValue(0)
         self.all_dtcs = []
 
-        # Try to read VIN in parallel
-        def read_thread():
-            # Read VIN first
+        def thread():
             try:
                 vin = vehicle.read_vin()
             except Exception:
                 vin = ""
-
             if vin:
                 self.after(0, lambda: self._load_vehicle_info(vin))
 
             all_dtcs: list[ModuleDTCs] = []
-            modules = [m for m in FORD_MODULES if m.abbreviation in (
-                "PCM", "TCM", "ABS", "RCM", "IPC", "BCM", "EPAS", "HVAC",
-                "ACM", "APIM", "DDM", "PDM", "PAM", "GWM", "TPMS", "HCM",
-                "PSCM", "ACC", "FSCM",
-            )]
+            wanted = ("PCM", "TCM", "ABS", "RCM", "IPC", "BCM", "EPAS", "HVAC",
+                      "ACM", "APIM", "DDM", "PDM", "PAM", "GWM", "TPMS", "HCM",
+                      "PSCM", "ACC", "FSCM")
+            modules = [m for m in FORD_MODULES if m.abbreviation in wanted]
 
             for i, module in enumerate(modules):
-                pct = (i / len(modules)) * 100
-                self.after(0, lambda p=pct: self.progress.config(value=p))
-                self.after(0, lambda n=module.name: self.status_label.config(text=f"Reading {n}..."))
-
+                pct = int((i / len(modules)) * 100)
+                self.after(0, lambda p=pct: self.progress.setValue(p))
+                self.after(0, lambda n=module.name: self.status_label.setText(f"Reading {n}..."))
                 try:
                     client = vehicle.get_uds_client(module)
                     reader = DTCReader(client)
@@ -212,98 +187,97 @@ class DTCPanel(ttk.Frame):
             self.all_dtcs = all_dtcs
             total = sum(m.count for m in all_dtcs)
             self.after(0, lambda: self._populate_results(all_dtcs))
-            self.after(0, lambda: self.count_label.config(text=f"{total} faults found"))
-            self.after(0, lambda: self.status_label.config(text=f"Read complete. {total} faults. Click AI Mechanic to diagnose."))
-            self.after(0, lambda: self.progress.config(value=100))
-            self.after(0, lambda: self.read_btn.config(state="normal"))
-            self.after(0, lambda: self.clear_btn.config(state="normal"))
-            self.after(0, lambda: self.ai_btn.config(state="normal"))
+            self.after(0, lambda: self.count_label.setText(f"{total} faults found"))
+            self.after(0, lambda: self.status_label.setText(
+                f"Read complete. {total} faults. Click AI Mechanic to diagnose."))
+            self.after(0, lambda: self.progress.setValue(100))
+            self.after(0, lambda: self.read_btn.setEnabled(True))
+            self.after(0, lambda: self.clear_btn.setEnabled(True))
+            self.after(0, lambda: self.ai_btn.setEnabled(True))
 
-        threading.Thread(target=read_thread, daemon=True).start()
+        run_thread(thread)
 
     def _clear_all(self):
         vehicle = self.get_vehicle()
         if not vehicle:
             return
-        if not messagebox.askyesno("Clear Faults", "Clear ALL fault codes from ALL modules?"):
+        if not confirm(self, "Clear Faults", "Clear ALL fault codes from ALL modules?"):
             return
-        self.clear_btn.config(state="disabled")
+        self.clear_btn.setEnabled(False)
 
-        def clear_thread():
-            modules = [m for m in FORD_MODULES if m.abbreviation in ("PCM", "TCM", "ABS", "BCM")]
+        def thread():
+            wanted = ("PCM", "TCM", "ABS", "BCM")
+            modules = [m for m in FORD_MODULES if m.abbreviation in wanted]
             cleared = 0
             for module in modules:
                 try:
                     client = vehicle.get_uds_client(module)
-                    reader = DTCReader(client)
-                    reader.clear_dtcs()
+                    DTCReader(client).clear_dtcs()
                     cleared += 1
                 except Exception:
                     pass
-            self.after(0, lambda: self.status_label.config(text=f"Faults cleared on {cleared} modules. Re-read to verify."))
-            self.after(0, lambda: self.clear_btn.config(state="normal"))
+            self.after(0, lambda: self.status_label.setText(
+                f"Faults cleared on {cleared} modules. Re-read to verify."))
+            self.after(0, lambda: self.clear_btn.setEnabled(True))
 
-        threading.Thread(target=clear_thread, daemon=True).start()
+        run_thread(thread)
 
     def _populate_results(self, all_dtcs: list[ModuleDTCs]):
-        self.tree.delete(*self.tree.get_children())
+        self.tree.clear()
         for mod in all_dtcs:
             for dtc in mod.dtcs:
                 if dtc.is_active:
-                    tag, status = "active", "ACTIVE"
+                    color, status = "#ff4444", "ACTIVE"
                 elif dtc.is_pending:
-                    tag, status = "pending", "PENDING"
+                    color, status = "#ffaa00", "PENDING"
                 else:
-                    tag, status = "stored", "STORED"
+                    color, status = "#999999", "STORED"
                 description = lookup_dtc(dtc.code)
-                self.tree.insert("", "end", values=(
+                item = QTreeWidgetItem([
                     mod.module_abbrev, dtc.code, description, status, dtc.status_text,
-                ), tags=(tag,))
+                ])
+                brush = QBrush(QColor(color))
+                for col in range(item.columnCount()):
+                    item.setForeground(col, brush)
+                item.setTextAlignment(1, Qt.AlignmentFlag.AlignCenter)
+                item.setTextAlignment(3, Qt.AlignmentFlag.AlignCenter)
+                self.tree.addTopLevelItem(item)
 
-    # ═══════════════════════════════════════════════════════════════
-    # Vehicle Info
-    # ═══════════════════════════════════════════════════════════════
+    # ───────────────────────── Vehicle info ─────────────────────────
 
     def _load_vehicle_info(self, vin: str):
-        self.vin_label.config(text=f"VIN: {vin}")
+        self.vin_label.setText(f"VIN: {vin}")
+        self.vehicle_info_text.setHtml(
+            '<i style="color:#888;">Decoding VIN...</i>'
+        )
 
-        # Show loading
-        self.vehicle_info_text.config(state="normal")
-        self.vehicle_info_text.delete("1.0", "end")
-        self.vehicle_info_text.insert("end", "Decoding VIN...\n", "loading")
-        self.vehicle_info_text.config(state="disabled")
-
-        def load_thread():
+        def thread():
             info = decode_vin(vin)
             self.after(0, lambda: self._display_vehicle_info(info))
-            # Load image if available
-            img_url = get_vehicle_image_url(vin, info.get("make", ""), info.get("model", ""), info.get("year", ""))
+            img_url = get_vehicle_image_url(
+                vin, info.get("make", ""), info.get("model", ""), info.get("year", "")
+            )
             if img_url:
-                self.after(0, lambda: self._load_vehicle_image(img_url))
+                self.after(0, lambda: self._show_vehicle_image_link(img_url))
 
-        threading.Thread(target=load_thread, daemon=True).start()
+        run_thread(thread)
 
     def _display_vehicle_info(self, info: dict):
         self.vehicle_info = info
-        self.vehicle_info_text.config(state="normal")
-        self.vehicle_info_text.delete("1.0", "end")
-
         if info.get("error"):
-            self.vehicle_info_text.insert("end", f"VIN: {info.get('vin', '?')}\n", "label")
-            self.vehicle_info_text.insert("end", f"Could not decode: {info['error']}\n", "loading")
-            self.vehicle_info_text.config(state="disabled")
+            self.vehicle_info_text.setHtml(
+                f'<b style="color:#cc6600;">VIN: {info.get("vin","?")}</b><br>'
+                f'<i style="color:#888;">Could not decode: {info["error"]}</i>'
+            )
             return
 
-        # VIN breakdown
-        self.vehicle_info_text.insert("end", "VIN Breakdown\n", "heading")
-        self.vehicle_info_text.insert("end", f"  VIN: ", "label")
-        self.vehicle_info_text.insert("end", f"{info.get('vin','?')}\n\n")
-
-        # Vehicle identity
+        html = []
+        html.append('<h3 style="color:#ff8800;margin:0;">VIN Breakdown</h3>')
+        html.append(f'<p style="color:#cc6600;"><b>VIN:</b> {info.get("vin","?")}</p>')
         year = info.get("year", "?")
         make = info.get("make", "?")
         model = info.get("model", "?")
-        self.vehicle_info_text.insert("end", f"  {year} {make} {model}\n\n", "heading")
+        html.append(f'<h3 style="color:#ff8800;margin:6px 0;">{year} {make} {model}</h3>')
 
         sections = [
             ("Drivetrain", [
@@ -332,124 +306,112 @@ class DTCPanel(ttk.Frame):
                 ("Side Airbags", info.get("airbags_side")),
             ]),
         ]
-
         for heading, fields in sections:
-            visible = [(label, val) for label, val in fields if val]
+            visible = [(lbl, val) for lbl, val in fields if val]
             if not visible:
                 continue
-            self.vehicle_info_text.insert("end", f"\n{heading}\n", "label")
-            for label, val in visible:
-                self.vehicle_info_text.insert("end", f"  {label}: ", "label")
-                self.vehicle_info_text.insert("end", f"{val}\n", "value")
-
+            html.append(f'<p style="color:#cc6600;margin-top:8px;"><b>{heading}</b></p>')
+            for lbl, val in visible:
+                html.append(f'<p style="margin:1px 0;"><b style="color:#cc6600;">&nbsp;&nbsp;{lbl}:</b> {val}</p>')
         if info.get("notes"):
-            self.vehicle_info_text.insert("end", f"\nNotes: {info['notes']}\n", "value")
+            html.append(f'<p style="margin-top:8px;">Notes: {info["notes"]}</p>')
 
-        self.vehicle_info_text.config(state="disabled")
+        self.vehicle_info_text.setHtml("".join(html))
 
-    def _load_vehicle_image(self, url: str):
+    def _show_vehicle_image_link(self, url: str):
         self._vehicle_image_url = url
-        # Update label to show clickable prompt
         if url.endswith(".jpg") or url.endswith(".png"):
-            self.vehicle_image_label.config(
-                text="🖼  Vehicle Image Found\n\nClick to view in browser",
-                fg="#44aaff", cursor="hand2")
+            self.vehicle_image_label.setText("🖼  Vehicle Image Found\n\nClick to view in browser")
         else:
-            self.vehicle_image_label.config(
-                text="🔍  Vehicle Lookup Page\n\nClick to open in browser",
-                fg="#44aaff", cursor="hand2")
-        self.vehicle_image_label.bind("<Button-1>", lambda e: self._open_vehicle_url())
-
-    # ═══════════════════════════════════════════════════════════════
-    # AI Mechanic Chat
-    # ═══════════════════════════════════════════════════════════════
+            self.vehicle_image_label.setText("🔍  Vehicle Lookup Page\n\nClick to open in browser")
+        self.vehicle_image_label.setStyleSheet(
+            "background-color: #1a1a1a; color: #44aaff; padding: 20px; border: 1px solid #444;"
+        )
 
     def _open_vehicle_url(self):
         if self._vehicle_image_url:
             webbrowser.open(self._vehicle_image_url)
 
+    # ───────────────────────── AI chat ─────────────────────────
+
     def _start_ai_session(self):
-        self.ai_btn.config(state="disabled")
-        self.chat_input.config(state="normal")
-        self.chat_text.config(state="normal")
-        self.chat_text.delete("1.0", "end")
-        self.chat_text.insert("end", "Starting AI Mechanic session...\n", "system")
-        self.chat_status.config(text="Connecting...")
+        self.ai_btn.setEnabled(False)
+        self.chat_input.setEnabled(True)
+        self.chat_text.clear()
+        self._append_chat("system", "Starting AI Mechanic session...")
+        self.chat_status.setText("Connecting...")
 
         def init_chat():
             try:
                 from modules.ai_chat import MechanicChat
-
                 dtc_data = []
                 for mod in self.all_dtcs:
                     mod_dtcs = []
-                    for dtc in mod.dtcs:
-                        desc = lookup_dtc(dtc.code)
+                    for d in mod.dtcs:
                         mod_dtcs.append({
-                            "code": dtc.code,
-                            "description": desc,
-                            "status": "ACTIVE" if dtc.is_active else ("PENDING" if dtc.is_pending else "STORED"),
-                            "status_text": dtc.status_text,
+                            "code": d.code,
+                            "description": lookup_dtc(d.code),
+                            "status": "ACTIVE" if d.is_active else ("PENDING" if d.is_pending else "STORED"),
+                            "status_text": d.status_text,
                         })
                     dtc_data.append({
                         "module_name": mod.module_name,
                         "module_abbrev": mod.module_abbrev,
                         "dtcs": mod_dtcs,
                     })
-
                 self.chat = MechanicChat()
                 self.chat.start_session(self.vehicle_info, dtc_data)
                 if dtc_data:
                     response = self.chat.send_message("Start the diagnosis. What do you see?")
                 else:
-                    response = self.chat.send_message("Introduce yourself briefly and ask what I'd like help with today.")
-
+                    response = self.chat.send_message(
+                        "Introduce yourself briefly and ask what I'd like help with today."
+                    )
                 self.after(0, lambda: self._append_chat("mechanic", response))
-                self.after(0, lambda: self.chat_status.config(text="Connected — ask anything"))
-                self.after(0, lambda: self.ai_btn.config(state="normal"))
+                self.after(0, lambda: self.chat_status.setText("Connected — ask anything"))
+                self.after(0, lambda: self.ai_btn.setEnabled(True))
             except Exception as e:
-                self.after(0, lambda: self._append_chat("error", f"Failed to start AI session: {str(e)}"))
-                self.after(0, lambda: self.chat_status.config(text="Error"))
-                self.after(0, lambda: self.ai_btn.config(state="normal"))
+                self.after(0, lambda: self._append_chat("error", f"Failed to start AI session: {e}"))
+                self.after(0, lambda: self.chat_status.setText("Error"))
+                self.after(0, lambda: self.ai_btn.setEnabled(True))
 
-        threading.Thread(target=init_chat, daemon=True).start()
+        run_thread(init_chat)
 
     def _send_chat(self):
         if not self.chat:
             return
-        user_text = self.chat_input.get().strip()
+        user_text = self.chat_input.text().strip()
         if not user_text:
             return
-
-        self.chat_input.delete(0, "end")
-        self.chat_input.config(state="disabled")
+        self.chat_input.clear()
+        self.chat_input.setEnabled(False)
         self._append_chat("user", user_text)
-        self.chat_status.config(text="Thinking...")
+        self.chat_status.setText("Thinking...")
 
-        def get_response():
+        def thread():
             try:
                 response = self.chat.send_message(user_text)
                 self.after(0, lambda: self._append_chat("mechanic", response))
-                self.after(0, lambda: self.chat_status.config(text="Connected — ask anything"))
+                self.after(0, lambda: self.chat_status.setText("Connected — ask anything"))
             except Exception as e:
-                self.after(0, lambda: self._append_chat("error", f"Error: {str(e)}"))
-                self.after(0, lambda: self.chat_status.config(text="Error"))
+                self.after(0, lambda: self._append_chat("error", f"Error: {e}"))
+                self.after(0, lambda: self.chat_status.setText("Error"))
             finally:
-                self.after(0, lambda: self.chat_input.config(state="normal"))
-                self.after(0, lambda: self.chat_input.focus())
+                self.after(0, lambda: self.chat_input.setEnabled(True))
+                self.after(0, lambda: self.chat_input.setFocus())
 
-        threading.Thread(target=get_response, daemon=True).start()
+        run_thread(thread)
 
     def _append_chat(self, role: str, text: str):
-        self.chat_text.config(state="normal")
+        from html import escape
         if role == "mechanic":
-            self.chat_text.insert("end", "\n🔧 Mechanic:\n", "mechanic")
+            prefix = '<span style="color:#ff8800;font-weight:bold;">🔧 Mechanic:</span>'
         elif role == "user":
-            self.chat_text.insert("end", "\n👤 You:\n", "user")
+            prefix = '<span style="color:#44aaff;font-weight:bold;">👤 You:</span>'
         elif role == "error":
-            self.chat_text.insert("end", "\n⚠ ", "error")
+            prefix = '<span style="color:#ff4444;font-weight:bold;">⚠</span>'
         else:
-            self.chat_text.insert("end", "\n", "system")
-        self.chat_text.insert("end", text + "\n")
-        self.chat_text.see("end")
-        self.chat_text.config(state="disabled")
+            prefix = '<span style="color:#888;font-style:italic;"></span>'
+        body = escape(text).replace("\n", "<br>")
+        self.chat_text.append(f"<br>{prefix}<br>{body}")
+        self.chat_text.verticalScrollBar().setValue(self.chat_text.verticalScrollBar().maximum())

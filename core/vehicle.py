@@ -2,7 +2,7 @@ import struct
 import time
 from dataclasses import dataclass, field
 from typing import Optional
-from core.j2534 import J2534, J2534Device, Protocol, FilterType
+from core.j2534 import J2534, J2534Device, Protocol, FilterType, ConnectFlag
 from core.protocols import (
     NetworkConfig, FordNetwork, FordModule, FORD_MODULES,
     FORD_HS_CAN, FORD_MS_CAN, FORD_BRANDS,
@@ -78,7 +78,7 @@ class VehicleConnection:
                 callback(module.name, i, len(FORD_MODULES))
             try:
                 client = self.get_uds_client(module)
-                client.diagnostic_session(UDSSession.DEFAULT)
+                client.diagnostic_session(UDSSession.FORD_DIAG)
                 info = ModuleInfo(module=module, present=True)
                 try:
                     data = client.read_data_by_id(0xF188)
@@ -107,18 +107,70 @@ class VehicleConnection:
         return found
 
     def read_vin(self) -> str:
+        # ── Method 1: UDS DIDs (primary — don't disrupt CAN state first) ──
+        vin_dids = [0xF190, 0xF110, 0xF18C]
+        sessions = [UDSSession.EXTENDED, UDSSession.FORD_DIAG, UDSSession.DEFAULT]
+        priority = ("PCM", "IPC", "BCM", "GWM")
         for module in FORD_MODULES:
-            if module.abbreviation in ("PCM", "BCM", "IPC"):
-                try:
-                    client = self.get_uds_client(module)
-                    data = client.read_data_by_id(0xF190)
-                    vin = data.decode("ascii", errors="replace").strip("\x00").strip()
-                    if len(vin) == 17:
-                        self.vehicle_info.vin = vin
-                        return vin
-                except Exception:
-                    pass
+            if module.abbreviation not in priority:
+                continue
+            for session in sessions:
+                for did in vin_dids:
+                    try:
+                        client = self.get_uds_client(module)
+                        try:
+                            client.diagnostic_session(session)
+                        except Exception:
+                            continue
+                        data = client.read_data_by_id(did)
+                        vin = data.decode("ascii", errors="replace").strip("\x00").strip()
+                        if len(vin) == 17:
+                            self.vehicle_info.vin = vin
+                            return vin
+                    except Exception:
+                        continue
+
+        # ── Method 2: OBD Mode 09 PID 02 (fallback — try last since it resets CAN state) ──
+        try:
+            data = self._obd_request(b"\x09\x02")
+            if data and len(data) > 3 and data[0:2] == b"\x49\x02":
+                vin = data[3:].decode("ascii", errors="replace").strip("\x00").strip()
+                if len(vin) == 17:
+                    self.vehicle_info.vin = vin
+                    return vin
+        except Exception:
+            pass
         return ""
+
+    def _obd_request(self, payload: bytes, timeout_ms: int = 1000) -> Optional[bytes]:
+        """Send a raw OBD-II request: set broadcast header 0x7DF, send Mode/PID, read 0x7E8."""
+        try:
+            # Force protocol 6 (ISO 15765-4, 11-bit, 500k) and set OBD broadcast header
+            self.j2534._elm_cmd(self.j2534._stream, "ATSP6", 600)
+            self.j2534._elm_cmd(self.j2534._stream, "ATSH 7DF", 400)
+            self.j2534._elm_cmd(self.j2534._stream, "ATAR", 200)
+            # Send the OBD request as hex (e.g., "0902")
+            import time
+            hex_cmd = payload.hex().upper()
+            self.j2534._stream.write(hex_cmd.encode() + b"\r")
+            time.sleep(0.05)
+            # Read response
+            resp = self.j2534._elm_cmd(self.j2534._stream, "", timeout_ms)
+            # Parse: should contain "49 02 01 XX XX ..."
+            if resp and "49" in resp and "02" in resp:
+                parts = resp.strip().replace(" ", "").upper()
+                if "490201" in parts:
+                    try:
+                        vin_hex = parts[parts.index("490201")+6:parts.index("490201")+40]
+                        raw = bytes.fromhex(vin_hex)
+                        vin = raw.decode("ascii", errors="replace").strip("\x00")
+                        if len(vin) >= 17:
+                            return vin[:17].encode()
+                    except Exception:
+                        pass
+            return None
+        except Exception:
+            return None
 
     def read_battery_voltage(self) -> float:
         v = self.j2534.read_battery_voltage()

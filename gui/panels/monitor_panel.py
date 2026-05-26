@@ -1,129 +1,136 @@
-import tkinter as tk
-from tkinter import ttk
-import threading
-import time
-from core.vehicle import VehicleConnection
-from modules.pid import PIDMonitor, PIDReading, PIDDefinition, STANDARD_PIDS, FORD_EXTENDED_PIDS
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import (
+    QComboBox, QGroupBox, QHBoxLayout, QLabel, QPushButton, QSplitter,
+    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+)
+
+from modules.pid import (
+    PIDMonitor, PIDReading, PIDDefinition, STANDARD_PIDS, FORD_EXTENDED_PIDS,
+)
+from gui.qt_helpers import BasePanel
 
 
-class MonitorPanel(ttk.Frame):
-    def __init__(self, parent, get_vehicle: callable):
+class MonitorPanel(BasePanel):
+    def __init__(self, parent: QWidget, get_vehicle):
         super().__init__(parent)
         self.get_vehicle = get_vehicle
         self.monitor: PIDMonitor | None = None
+        self._pid_map: dict[str, PIDDefinition] = {}
         self._build_ui()
+        self._populate_available()
 
     def _build_ui(self):
-        toolbar = ttk.Frame(self)
-        toolbar.pack(fill="x", pady=(0, 5))
+        v = QVBoxLayout(self)
 
-        self.start_btn = ttk.Button(toolbar, text="Start Monitor", command=self._toggle_monitor)
-        self.start_btn.pack(side="left", padx=2)
+        tb = QHBoxLayout()
+        self.start_btn = QPushButton("Start Monitor")
+        self.start_btn.clicked.connect(self._toggle_monitor)
+        tb.addWidget(self.start_btn)
+        tb.addWidget(QLabel("Update interval:"))
+        self.interval_combo = QComboBox()
+        self.interval_combo.addItems(["50", "100", "200", "500", "1000"])
+        self.interval_combo.setCurrentText("200")
+        self.interval_combo.setFixedWidth(80)
+        tb.addWidget(self.interval_combo)
+        tb.addWidget(QLabel("ms"))
+        tb.addStretch(1)
+        self.status_label = QLabel("")
+        tb.addWidget(self.status_label)
+        v.addLayout(tb)
 
-        ttk.Label(toolbar, text="Update interval:").pack(side="left", padx=(15, 5))
-        self.interval_var = tk.StringVar(value="200")
-        interval_combo = ttk.Combobox(
-            toolbar, textvariable=self.interval_var,
-            values=["50", "100", "200", "500", "1000"], width=6, state="readonly",
-        )
-        interval_combo.pack(side="left")
-        ttk.Label(toolbar, text="ms").pack(side="left", padx=(2, 0))
+        split = QSplitter(Qt.Orientation.Horizontal)
+        v.addWidget(split, stretch=1)
 
-        self.status_label = ttk.Label(toolbar, text="")
-        self.status_label.pack(side="right")
+        avail_box = QGroupBox("Available PIDs")
+        avail_v = QVBoxLayout(avail_box)
+        self.avail_tree = QTreeWidget()
+        self.avail_tree.setHeaderLabels(["Name", "Unit", "Module"])
+        self.avail_tree.setColumnWidth(0, 180)
+        self.avail_tree.setColumnWidth(1, 50)
+        self.avail_tree.setColumnWidth(2, 50)
+        self.avail_tree.setAlternatingRowColors(True)
+        self.avail_tree.itemDoubleClicked.connect(lambda *_: self._add_pid())
+        avail_v.addWidget(self.avail_tree)
+        split.addWidget(avail_box)
 
-        paned = ttk.PanedWindow(self, orient="horizontal")
-        paned.pack(fill="both", expand=True)
+        # Buttons column
+        btn_col = QWidget()
+        btn_v = QVBoxLayout(btn_col)
+        btn_v.addStretch(1)
+        add_btn = QPushButton("Add >>")
+        add_btn.clicked.connect(self._add_pid)
+        add_btn.setFixedWidth(110)
+        btn_v.addWidget(add_btn)
+        rm_btn = QPushButton("<< Remove")
+        rm_btn.clicked.connect(self._remove_pid)
+        rm_btn.setFixedWidth(110)
+        btn_v.addWidget(rm_btn)
+        all_btn = QPushButton("Add All")
+        all_btn.clicked.connect(self._add_all)
+        all_btn.setFixedWidth(110)
+        btn_v.addWidget(all_btn)
+        btn_v.addStretch(1)
+        btn_col.setFixedWidth(130)
+        split.addWidget(btn_col)
 
-        left = ttk.LabelFrame(paned, text="Available PIDs", padding=5)
-        paned.add(left, weight=1)
+        live_box = QGroupBox("Live Data")
+        live_v = QVBoxLayout(live_box)
+        self.live_tree = QTreeWidget()
+        self.live_tree.setHeaderLabels(["Parameter", "Value", "Raw", "Unit"])
+        self.live_tree.setColumnWidth(0, 180)
+        self.live_tree.setColumnWidth(1, 100)
+        self.live_tree.setColumnWidth(2, 80)
+        self.live_tree.setColumnWidth(3, 60)
+        self.live_tree.setAlternatingRowColors(True)
+        self.live_tree.itemDoubleClicked.connect(lambda *_: self._remove_pid())
+        live_v.addWidget(self.live_tree)
+        split.addWidget(live_box)
 
-        self.avail_tree = ttk.Treeview(left, columns=("name", "unit", "module"), show="headings", height=25)
-        self.avail_tree.heading("name", text="Name")
-        self.avail_tree.heading("unit", text="Unit")
-        self.avail_tree.heading("module", text="Module")
-        self.avail_tree.column("name", width=180)
-        self.avail_tree.column("unit", width=50, anchor="center")
-        self.avail_tree.column("module", width=50, anchor="center")
-
-        avail_scroll = ttk.Scrollbar(left, orient="vertical", command=self.avail_tree.yview)
-        self.avail_tree.configure(yscrollcommand=avail_scroll.set)
-        self.avail_tree.pack(side="left", fill="both", expand=True)
-        avail_scroll.pack(side="right", fill="y")
-
-        btn_frame = ttk.Frame(paned)
-        paned.add(btn_frame, weight=0)
-
-        ttk.Button(btn_frame, text="Add >>", command=self._add_pid, width=10).pack(pady=20)
-        ttk.Button(btn_frame, text="<< Remove", command=self._remove_pid, width=10).pack(pady=5)
-        ttk.Button(btn_frame, text="Add All", command=self._add_all, width=10).pack(pady=20)
-
-        right = ttk.LabelFrame(paned, text="Live Data", padding=5)
-        paned.add(right, weight=2)
-
-        self.live_tree = ttk.Treeview(
-            right, columns=("name", "value", "raw", "unit"), show="headings", height=25,
-        )
-        self.live_tree.heading("name", text="Parameter")
-        self.live_tree.heading("value", text="Value")
-        self.live_tree.heading("raw", text="Raw")
-        self.live_tree.heading("unit", text="Unit")
-        self.live_tree.column("name", width=180)
-        self.live_tree.column("value", width=100, anchor="center")
-        self.live_tree.column("raw", width=80, anchor="center")
-        self.live_tree.column("unit", width=60, anchor="center")
-
-        live_scroll = ttk.Scrollbar(right, orient="vertical", command=self.live_tree.yview)
-        self.live_tree.configure(yscrollcommand=live_scroll.set)
-        self.live_tree.pack(side="left", fill="both", expand=True)
-        live_scroll.pack(side="right", fill="y")
-
-        # Double-click to add/remove PIDs
-        self.avail_tree.bind("<Double-1>", lambda e: self._add_pid())
-        self.live_tree.bind("<Double-1>", lambda e: self._remove_pid())
-
-        self._pid_map: dict[str, PIDDefinition] = {}
-        self._populate_available()
+        split.setStretchFactor(0, 1)
+        split.setStretchFactor(2, 2)
 
     def _populate_available(self):
         self._pid_map.clear()
-        all_pids = STANDARD_PIDS + FORD_EXTENDED_PIDS
-        for pid in all_pids:
-            iid = self.avail_tree.insert("", "end", values=(pid.name, pid.unit, pid.module))
+        for pid in STANDARD_PIDS + FORD_EXTENDED_PIDS:
+            iid = f"pid_{pid.did:04X}"
+            item = QTreeWidgetItem([pid.name, pid.unit, pid.module])
+            item.setData(0, Qt.ItemDataRole.UserRole, iid)
+            self.avail_tree.addTopLevelItem(item)
             self._pid_map[iid] = pid
+
+    def _live_has(self, pid_name: str) -> bool:
+        for i in range(self.live_tree.topLevelItemCount()):
+            if self.live_tree.topLevelItem(i).text(0) == pid_name:
+                return True
+        return False
+
     def _add_pid(self):
-        sel = self.avail_tree.selection()
-        if not sel:
-            return
-        for iid in sel:
+        for sel in self.avail_tree.selectedItems():
+            iid = sel.data(0, Qt.ItemDataRole.UserRole)
             pid = self._pid_map.get(iid)
-            if pid:
-                # Check if already in live tree
-                existing = {self.live_tree.item(c)["values"][0] for c in self.live_tree.get_children()}
-                if pid.name not in existing:
-                    self.live_tree.insert("", "end", iid=f"live_{pid.did:04X}",
-                                           values=(pid.name, "--", "--", pid.unit))
-        # Auto-expand to show added PIDs
-        if self.live_tree.get_children():
-            self.live_tree.see(self.live_tree.get_children()[0])
+            if pid and not self._live_has(pid.name):
+                item = QTreeWidgetItem([pid.name, "--", "--", pid.unit])
+                item.setData(0, Qt.ItemDataRole.UserRole, f"live_{pid.did:04X}")
+                self.live_tree.addTopLevelItem(item)
 
     def _remove_pid(self):
-        sel = self.live_tree.selection()
-        for iid in sel:
-            self.live_tree.delete(iid)
+        for sel in self.live_tree.selectedItems():
+            idx = self.live_tree.indexOfTopLevelItem(sel)
+            if idx >= 0:
+                self.live_tree.takeTopLevelItem(idx)
 
     def _add_all(self):
-        for iid, pid in self._pid_map.items():
-            existing = [self.live_tree.item(c)["values"][0] for c in self.live_tree.get_children()]
-            if pid.name not in existing:
-                self.live_tree.insert("", "end", iid=f"live_{pid.did:04X}",
-                                       values=(pid.name, "--", "--", pid.unit))
+        for _iid, pid in self._pid_map.items():
+            if not self._live_has(pid.name):
+                item = QTreeWidgetItem([pid.name, "--", "--", pid.unit])
+                item.setData(0, Qt.ItemDataRole.UserRole, f"live_{pid.did:04X}")
+                self.live_tree.addTopLevelItem(item)
 
     def _toggle_monitor(self):
         if self.monitor and self.monitor.is_running:
             self.monitor.stop()
-            self.start_btn.config(text="Start Monitor")
-            self.status_label.config(text="Stopped")
+            self.start_btn.setText("Start Monitor")
+            self.status_label.setText("Stopped")
             return
 
         vehicle = self.get_vehicle()
@@ -131,35 +138,41 @@ class MonitorPanel(ttk.Frame):
             return
 
         self.monitor = PIDMonitor(vehicle)
-
         all_pids = {f"live_{p.did:04X}": p for p in STANDARD_PIDS + FORD_EXTENDED_PIDS}
-        for child in self.live_tree.get_children():
-            pid = all_pids.get(child)
+        for i in range(self.live_tree.topLevelItemCount()):
+            iid = self.live_tree.topLevelItem(i).data(0, Qt.ItemDataRole.UserRole)
+            pid = all_pids.get(iid)
             if pid:
                 self.monitor.add_pid(pid)
 
         if not self.monitor.active_pids:
-            self.status_label.config(text="Add PIDs to monitor first")
+            self.status_label.setText("Add PIDs to monitor first")
             return
 
-        interval = int(self.interval_var.get()) / 1000.0
+        interval = int(self.interval_combo.currentText()) / 1000.0
         self.monitor.start(callback=self._on_readings, interval=interval)
-        self.start_btn.config(text="Stop Monitor")
-        self.status_label.config(text="Monitoring...")
+        self.start_btn.setText("Stop Monitor")
+        self.status_label.setText("Monitoring...")
 
     def _on_readings(self, readings: dict[int, PIDReading]):
         def update():
+            # Build a lookup by iid
+            id_to_idx: dict[str, int] = {}
+            for i in range(self.live_tree.topLevelItemCount()):
+                item = self.live_tree.topLevelItem(i)
+                iid = item.data(0, Qt.ItemDataRole.UserRole)
+                id_to_idx[iid] = i
             for did, reading in readings.items():
                 iid = f"live_{did:04X}"
-                try:
-                    self.live_tree.item(iid, values=(
-                        reading.pid.name,
-                        reading.display_value,
-                        f"0x{reading.raw_value:04X}",
-                        reading.pid.unit,
-                    ))
-                except tk.TclError:
-                    pass
+                idx = id_to_idx.get(iid)
+                if idx is None:
+                    continue
+                item = self.live_tree.topLevelItem(idx)
+                item.setText(0, reading.pid.name)
+                item.setText(1, str(reading.display_value))
+                item.setText(2, f"0x{reading.raw_value:04X}")
+                item.setText(3, reading.pid.unit)
+
         self.after(0, update)
 
     def stop_monitor(self):

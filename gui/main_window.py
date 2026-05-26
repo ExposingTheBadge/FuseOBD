@@ -1,7 +1,15 @@
-import tkinter as tk
-from tkinter import ttk, messagebox
+import os
+import sys
 import webbrowser
 from typing import Optional
+
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QAction, QIcon
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QMessageBox, QTabWidget, QStatusBar,
+    QVBoxLayout, QWidget, QDialog, QLabel, QPushButton, QTextEdit, QFrame,
+)
+
 from core.j2534 import J2534
 from core.vehicle import VehicleConnection
 from gui.panels.connection import ConnectionPanel
@@ -11,9 +19,11 @@ from gui.panels.pats_panel import PATSPanel
 from gui.panels.asbuilt_panel import AsBuiltPanel
 from gui.panels.monitor_panel import MonitorPanel
 from gui.panels.security_panel import SecurityPanel
-from gui.theme import apply_theme, current_theme
+from gui.theme import apply_theme
+from gui.qt_helpers import warn, confirm, info
 from version import VERSION, VERSION_SHORT, APP_NAME, APP_DESC, BUILD
 from modules.updater import check_async, UpdateInfo
+
 
 AUTHOR = "Brent Gordon"
 HOMEPAGE = "https://fuse-obd.com"
@@ -34,184 +44,79 @@ LICENSE_TEXT = (
 )
 
 
-class MainWindow:
-    def __init__(self):
-        self.root = tk.Tk()
-        self.root.title(f"{APP_NAME} v{VERSION} — {APP_DESC}")
-        self.root.geometry("1200x750")
-        self.root.minsize(900, 600)
+def _resource_path(name: str) -> str:
+    if getattr(sys, "frozen", False):
+        return os.path.join(sys._MEIPASS, name)
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", name)
 
-        # Set window icon (matches the exe icon)
-        import sys, os as _os
-        if getattr(sys, 'frozen', False):
-            icon_path = _os.path.join(sys._MEIPASS, 'fuse.ico')
-        else:
-            icon_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '..', 'fuse.ico')
-        if _os.path.exists(icon_path):
-            self.root.iconbitmap(default=icon_path)
+
+class FuseMainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle(f"{APP_NAME} v{VERSION} — {APP_DESC}")
+        self.resize(1200, 750)
+        self.setMinimumSize(900, 600)
+
+        icon_path = _resource_path("fuse.ico")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
 
         self.vehicle: Optional[VehicleConnection] = None
+
         self._build_menu()
         self._build_ui()
-        apply_theme(self.root, "dark")
-        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # Silent auto-update check on startup (no message if offline or up-to-date)
-        self.root.after(1500, self._auto_check_updates)
+        # Silent auto-update check on startup
+        QTimer.singleShot(1500, self._auto_check_updates)
+
+    # ── Menu ──
 
     def _build_menu(self):
-        menubar = tk.Menu(self.root)
-        self.root.config(menu=menubar)
+        mb = self.menuBar()
 
-        file_menu = tk.Menu(menubar, tearoff=0)
-        file_menu.add_command(label="Check for Updates", command=self._manual_check_updates)
-        file_menu.add_separator()
-        file_menu.add_command(label="Exit", command=self._on_close)
-        menubar.add_cascade(label="File", menu=file_menu)
+        file_menu = mb.addMenu("&File")
+        act_check = QAction("Check for Updates", self)
+        act_check.triggered.connect(self._manual_check_updates)
+        file_menu.addAction(act_check)
+        file_menu.addSeparator()
+        act_exit = QAction("Exit", self)
+        act_exit.triggered.connect(self.close)
+        file_menu.addAction(act_exit)
 
-        view_menu = tk.Menu(menubar, tearoff=0)
-        view_menu.add_command(label="Dark Theme", command=lambda: self._set_theme("dark"))
-        view_menu.add_command(label="Light Theme", command=lambda: self._set_theme("light"))
-        menubar.add_cascade(label="View", menu=view_menu)
+        view_menu = mb.addMenu("&View")
+        act_dark = QAction("Dark Theme", self)
+        act_dark.triggered.connect(lambda: self._set_theme("dark"))
+        view_menu.addAction(act_dark)
+        act_light = QAction("Light Theme", self)
+        act_light.triggered.connect(lambda: self._set_theme("light"))
+        view_menu.addAction(act_light)
 
-        help_menu = tk.Menu(menubar, tearoff=0)
-        help_menu.add_command(label="About Fuse OBD", command=self._show_about)
-        help_menu.add_command(label="License", command=self._show_license)
-        help_menu.add_separator()
-        help_menu.add_command(label="Visit Website", command=lambda: webbrowser.open(HOMEPAGE))
-        menubar.add_cascade(label="Help", menu=help_menu)
+        help_menu = mb.addMenu("&Help")
+        act_about = QAction("About Fuse OBD", self)
+        act_about.triggered.connect(self._show_about)
+        help_menu.addAction(act_about)
+        act_lic = QAction("License", self)
+        act_lic.triggered.connect(self._show_license)
+        help_menu.addAction(act_lic)
+        help_menu.addSeparator()
+        act_web = QAction("Visit Website", self)
+        act_web.triggered.connect(lambda: webbrowser.open(HOMEPAGE))
+        help_menu.addAction(act_web)
 
-    def _show_about(self):
-        about = tk.Toplevel(self.root)
-        about.title(f"About {APP_NAME}")
-        about.geometry("420x380")
-        about.resizable(False, False)
-        about.transient(self.root)
-        about.grab_set()
-
-        title = tk.Label(about, text=APP_NAME, font=("Segoe UI", 24, "bold"))
-        title.pack(pady=(20, 2))
-
-        subtitle = tk.Label(about, text=APP_DESC, font=("Segoe UI", 11))
-        subtitle.pack()
-
-        ver = tk.Label(about, text=f"Version {VERSION}", font=("Segoe UI", 10), fg="gray")
-        ver.pack(pady=(5, 15))
-
-        sep = ttk.Separator(about, orient="horizontal")
-        sep.pack(fill="x", padx=30)
-
-        creator = tk.Label(about, text=f"Created by {AUTHOR}", font=("Segoe UI", 12, "bold"))
-        creator.pack(pady=(15, 5))
-
-        license_lbl = tk.Label(about, text="Free and open source — MIT License", font=("Segoe UI", 10), fg="#2070c0")
-        license_lbl.pack(pady=(0, 5))
-
-        features = tk.Label(
-            about,
-            text=(
-                "Module Scanner  |  Fault Reader/Clear  |  AI Mechanic Chat\n"
-                "Key Programming (PATS)  |  Factory Settings Read/Write\n"
-                "Live PID Monitor  |  Security Access  |  VIN Decoder\n\n"
-                "No licensing. No subscriptions. No limits."
-            ),
-            font=("Segoe UI", 9), fg="gray", justify="center",
-        )
-        features.pack(pady=(5, 15))
-
-        website = tk.Label(about, text=HOMEPAGE, font=("Segoe UI", 9), fg="#4488ff", cursor="hand2")
-        website.pack(pady=(0, 5))
-        website.bind("<Button-1>", lambda e: webbrowser.open(HOMEPAGE))
-
-        ttk.Button(about, text="Close", command=about.destroy, width=10).pack(pady=(0, 15))
-
-    def _show_license(self):
-        lic_win = tk.Toplevel(self.root)
-        lic_win.title("License — Fuse OBD")
-        lic_win.geometry("550x400")
-        lic_win.transient(self.root)
-        lic_win.grab_set()
-
-        text = tk.Text(lic_win, wrap="word", font=("Consolas", 9), padx=15, pady=15)
-        scroll = ttk.Scrollbar(lic_win, orient="vertical", command=text.yview)
-        text.configure(yscrollcommand=scroll.set)
-        scroll.pack(side="right", fill="y")
-        text.pack(fill="both", expand=True)
-        text.insert("1.0", LICENSE_TEXT)
-        text.config(state="disabled")
-
-        btn_frame = ttk.Frame(lic_win)
-        btn_frame.pack(fill="x", pady=10)
-        ttk.Button(btn_frame, text="Close", command=lic_win.destroy, width=10).pack()
-
-    # ── Update system ──
-
-    def _auto_check_updates(self):
-        """Silent check on startup. Only notifies if update is available."""
-        check_async(VERSION_SHORT, BUILD,
-                    lambda info: self.root.after(0, self._on_update_result, info))
-
-    def _manual_check_updates(self):
-        """User-initiated check. Always shows result."""
-        self.global_status.config(text="Checking for updates...")
-        check_async(VERSION_SHORT, BUILD,
-                    lambda info: self.root.after(0, self._on_manual_result, info))
-
-    def _on_update_result(self, info: UpdateInfo):
-        """Callback for auto-check. Silent if up-to-date or offline."""
-        if info.available:
-            self._show_update_dialog(info)
-        # If not available and no error, or if offline error — stay silent
-
-    def _on_manual_result(self, info: UpdateInfo):
-        """Callback for manual check. Always reports status."""
-        if info.error:
-            self.global_status.config(text=f"Update check failed: {info.error}")
-            messagebox.showinfo("Update Check",
-                f"Could not reach the update server.\n\n{info.error}\n\n"
-                "Check your internet connection and try again, or visit\n"
-                f"{HOMEPAGE} to download the latest version.",
-                parent=self.root)
-        elif info.available:
-            self._show_update_dialog(info)
-        else:
-            self.global_status.config(text=f"Fuse OBD is up to date (v{VERSION})")
-            messagebox.showinfo("Update Check",
-                f"You're running the latest version of {APP_NAME}.\n\n"
-                f"Current: v{VERSION}\nLatest: v{info.latest_version}\n\n"
-                f"Released: {info.release_date}",
-                parent=self.root)
-
-    def _show_update_dialog(self, info: UpdateInfo):
-        """Show update available dialog."""
-        self.global_status.config(
-            text=f"Update available: v{info.latest_version} (you have v{VERSION})"
-        )
-        mandatory = "\n\nThis is a MANDATORY update." if info.mandatory else ""
-        result = messagebox.askyesno(
-            "Update Available",
-            f"A new version of {APP_NAME} is available!\n\n"
-            f"Your version: v{VERSION}\n"
-            f"Latest version: v{info.latest_version}\n"
-            f"Released: {info.release_date} ({info.size_mb} MB)\n\n"
-            f"{info.release_notes}{mandatory}\n\n"
-            "Would you like to visit the download page?",
-            parent=self.root,
-        )
-        if result:
-            webbrowser.open(info.download_url or HOMEPAGE)
-
-    # ── UI ──
+    # ── Layout ──
 
     def _build_ui(self):
+        central = QWidget(self)
+        layout = QVBoxLayout(central)
+        layout.setContentsMargins(10, 10, 10, 5)
+        layout.setSpacing(6)
+
         self.conn_panel = ConnectionPanel(
-            self.root, on_connect=self._on_connect, on_disconnect=self._on_disconnect,
+            self, on_connect=self._on_connect, on_disconnect=self._on_disconnect,
         )
-        self.conn_panel.pack(fill="x", padx=10, pady=(10, 5))
+        layout.addWidget(self.conn_panel)
 
-        self.notebook = ttk.Notebook(self.root)
-        self.notebook.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-
+        self.notebook = QTabWidget(self)
         self.scanner_panel = ScannerPanel(self.notebook, self._get_vehicle)
         self.dtc_panel = DTCPanel(self.notebook, self._get_vehicle)
         self.pats_panel = PATSPanel(self.notebook, self._get_vehicle)
@@ -219,53 +124,227 @@ class MainWindow:
         self.monitor_panel = MonitorPanel(self.notebook, self._get_vehicle)
         self.security_panel = SecurityPanel(self.notebook, self._get_vehicle)
 
-        self.notebook.add(self.scanner_panel, text="  Scanner  ")
-        self.notebook.add(self.dtc_panel, text="  Faults  ")
-        self.notebook.add(self.pats_panel, text="  Program Keys  ")
-        self.notebook.add(self.asbuilt_panel, text="  Factory Settings  ")
-        self.notebook.add(self.monitor_panel, text="  Live Data  ")
-        self.notebook.add(self.security_panel, text="  Security Access  ")
+        self.notebook.addTab(self.scanner_panel, "  Scanner  ")
+        self.notebook.addTab(self.dtc_panel, "  Faults  ")
+        self.notebook.addTab(self.pats_panel, "  Program Keys  ")
+        self.notebook.addTab(self.asbuilt_panel, "  Factory Settings  ")
+        self.notebook.addTab(self.monitor_panel, "  Live Data  ")
+        self.notebook.addTab(self.security_panel, "  Security Access  ")
 
-        status = ttk.Frame(self.root)
-        status.pack(fill="x", padx=10, pady=(0, 5))
-        self.global_status = ttk.Label(
-            status, text=f"{APP_NAME} v{VERSION} — Free and open source (MIT License)",
-        )
-        self.global_status.pack(side="left")
+        layout.addWidget(self.notebook, stretch=1)
+        self.setCentralWidget(central)
+
+        self.global_status = QLabel(f"{APP_NAME} v{VERSION} — Free and open source (MIT License)")
+        status_bar = QStatusBar(self)
+        status_bar.addWidget(self.global_status, 1)
+        self.setStatusBar(status_bar)
+
+    # ── Connection callbacks ──
 
     def _on_connect(self, j2534: J2534):
         self.vehicle = VehicleConnection(j2534)
+        hs_ok = ms_ok = False
         try:
             self.vehicle.connect_hs_can()
+            hs_ok = True
         except Exception as e:
-            messagebox.showwarning("HS CAN", f"Could not open HS CAN: {e}")
+            warn(self, "HS CAN", f"Could not open HS CAN: {e}")
         try:
             self.vehicle.connect_ms_can()
+            ms_ok = True
         except Exception as e:
-            messagebox.showwarning("MS CAN", f"Could not open MS CAN: {e}")
-        self.global_status.config(text="Connected — ready to scan")
+            warn(self, "MS CAN", f"Could not open MS CAN: {e}")
+
+        # Verify communication by reading VIN
+        try:
+            vin = self.vehicle.read_vin()
+            if vin and len(vin) == 17:
+                self.global_status.setText(f"Connected — VIN: {vin}")
+            else:
+                self.global_status.setText("Connected — Vehicle not responding (check ignition is ON)")
+                warn(self, "No Response",
+                     "Adapter connected but vehicle is not responding.\n\n"
+                     "Make sure:\n"
+                     "  • Ignition is ON (engine running for full scan)\n"
+                     "  • OBD connector is fully seated\n"
+                     "  • HS-CAN pins (6 & 14) are functional\n\n"
+                     "The adapter itself is working — the car isn't talking back.")
+        except Exception:
+            tag = " ".join(filter(None, [
+                "HS-CAN" if hs_ok else "",
+                "MS-CAN" if ms_ok else "",
+            ])).strip()
+            if tag:
+                self.global_status.setText(f"Connected ({tag}) — VIN read failed")
+            else:
+                self.global_status.setText("Connected — no CAN channels available")
+
         # Enable AI Mechanic button now that vehicle is connected
-        self.dtc_panel.ai_btn.config(state="normal")
+        self.dtc_panel.ai_btn.setEnabled(True)
 
     def _on_disconnect(self):
         self.monitor_panel.stop_monitor()
         if self.vehicle:
             self.vehicle.disconnect_all()
             self.vehicle = None
-        self.global_status.config(text=f"{APP_NAME} v{VERSION} — Disconnected")
+        self.global_status.setText(f"{APP_NAME} v{VERSION} — Disconnected")
 
     def _get_vehicle(self) -> Optional[VehicleConnection]:
         if not self.vehicle:
-            messagebox.showwarning("Not Connected", "Connect to a vehicle first")
+            warn(self, "Not Connected", "Connect to a vehicle first")
             return None
         return self.vehicle
 
-    def _set_theme(self, name: str):
-        apply_theme(self.root, name)
+    # ── Theme ──
 
-    def _on_close(self):
+    def _set_theme(self, name: str):
+        apply_theme(QApplication.instance(), name)
+
+    # ── Updates ──
+
+    def _auto_check_updates(self):
+        check_async(VERSION_SHORT, BUILD,
+                    lambda i: QTimer.singleShot(0, lambda: self._on_update_result(i)))
+
+    def _manual_check_updates(self):
+        self.global_status.setText("Checking for updates...")
+        check_async(VERSION_SHORT, BUILD,
+                    lambda i: QTimer.singleShot(0, lambda: self._on_manual_result(i)))
+
+    def _on_update_result(self, i: UpdateInfo):
+        if i.available:
+            self._show_update_dialog(i)
+
+    def _on_manual_result(self, i: UpdateInfo):
+        if i.error:
+            self.global_status.setText(f"Update check failed: {i.error}")
+            info(self, "Update Check",
+                 f"Could not reach the update server.\n\n{i.error}\n\n"
+                 "Check your internet connection and try again, or visit\n"
+                 f"{HOMEPAGE} to download the latest version.")
+        elif i.available:
+            self._show_update_dialog(i)
+        else:
+            self.global_status.setText(f"Fuse OBD is up to date (v{VERSION})")
+            info(self, "Update Check",
+                 f"You're running the latest version of {APP_NAME}.\n\n"
+                 f"Current: v{VERSION}\nLatest: v{i.latest_version}\n\n"
+                 f"Released: {i.release_date}")
+
+    def _show_update_dialog(self, i: UpdateInfo):
+        self.global_status.setText(
+            f"Update available: v{i.latest_version} (you have v{VERSION})"
+        )
+        mandatory = "\n\nThis is a MANDATORY update." if i.mandatory else ""
+        if confirm(self, "Update Available",
+                   f"A new version of {APP_NAME} is available!\n\n"
+                   f"Your version: v{VERSION}\n"
+                   f"Latest version: v{i.latest_version}\n"
+                   f"Released: {i.release_date} ({i.size_mb} MB)\n\n"
+                   f"{i.release_notes}{mandatory}\n\n"
+                   "Would you like to visit the download page?"):
+            webbrowser.open(i.download_url or HOMEPAGE)
+
+    # ── About / License dialogs ──
+
+    def _show_about(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"About {APP_NAME}")
+        dlg.setFixedSize(420, 380)
+
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(20, 20, 20, 15)
+
+        title = QLabel(APP_NAME)
+        title.setStyleSheet("font-size: 24pt; font-weight: bold;")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        v.addWidget(title)
+
+        subtitle = QLabel(APP_DESC)
+        subtitle.setStyleSheet("font-size: 11pt;")
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        v.addWidget(subtitle)
+
+        ver = QLabel(f"Version {VERSION}")
+        ver.setStyleSheet("color: gray;")
+        ver.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        v.addWidget(ver)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        v.addWidget(sep)
+
+        creator = QLabel(f"Created by {AUTHOR}")
+        creator.setStyleSheet("font-size: 12pt; font-weight: bold;")
+        creator.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        v.addWidget(creator)
+
+        lic = QLabel("Free and open source — MIT License")
+        lic.setStyleSheet("color: #2070c0;")
+        lic.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        v.addWidget(lic)
+
+        features = QLabel(
+            "Module Scanner  |  Fault Reader/Clear  |  AI Mechanic Chat\n"
+            "Key Programming (PATS)  |  Factory Settings Read/Write\n"
+            "Live PID Monitor  |  Security Access  |  VIN Decoder\n\n"
+            "No licensing. No subscriptions. No limits."
+        )
+        features.setStyleSheet("color: gray;")
+        features.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        v.addWidget(features)
+
+        website = QLabel(f'<a href="{HOMEPAGE}" style="color:#4488ff;">{HOMEPAGE}</a>')
+        website.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        website.setOpenExternalLinks(True)
+        v.addWidget(website)
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dlg.accept)
+        close_btn.setFixedWidth(100)
+        btn_row = QVBoxLayout()
+        btn_row.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+        v.addLayout(btn_row)
+
+        dlg.exec()
+
+    def _show_license(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("License — Fuse OBD")
+        dlg.resize(550, 400)
+        v = QVBoxLayout(dlg)
+
+        text = QTextEdit()
+        text.setReadOnly(True)
+        text.setPlainText(LICENSE_TEXT)
+        text.setStyleSheet('font-family: Consolas, monospace; font-size: 9pt;')
+        v.addWidget(text)
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dlg.accept)
+        close_btn.setFixedWidth(100)
+        v.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        dlg.exec()
+
+    # ── Lifecycle ──
+
+    def closeEvent(self, event):
         self._on_disconnect()
-        self.root.destroy()
+        super().closeEvent(event)
+
+
+class MainWindow:
+    """Compatibility shim so app.py keeps the same entry-point shape."""
+
+    def __init__(self):
+        self.app = QApplication.instance() or QApplication(sys.argv)
+        apply_theme(self.app, "dark")
+        icon_path = _resource_path("fuse.ico")
+        if os.path.exists(icon_path):
+            self.app.setWindowIcon(QIcon(icon_path))
+        self.window = FuseMainWindow()
 
     def run(self):
-        self.root.mainloop()
+        self.window.show()
+        sys.exit(self.app.exec())

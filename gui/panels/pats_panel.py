@@ -1,93 +1,95 @@
-import tkinter as tk
-from tkinter import ttk, messagebox
-import threading
-from core.vehicle import VehicleConnection
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import (
+    QComboBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
+    QPlainTextEdit, QPushButton, QSplitter, QVBoxLayout, QWidget,
+)
+
 from modules.pats import PATSManager, PATSInfo
 from utils.ford_crypto import compute_incode, PATSType
+from gui.qt_helpers import BasePanel, run_thread, warn, confirm, info, error
 
 
-class PATSPanel(ttk.Frame):
-    def __init__(self, parent, get_vehicle: callable):
+PATS_CHOICES = [
+    "Auto (from vehicle)",
+    "PATS I/II (1996-2005)",
+    "PATS III (2005-2010)",
+    "PATS IV/V (2010+)",
+]
+
+
+class PATSPanel(BasePanel):
+    def __init__(self, parent: QWidget, get_vehicle):
         super().__init__(parent)
         self.get_vehicle = get_vehicle
         self.pats_manager: PATSManager | None = None
         self._build_ui()
 
     def _build_ui(self):
-        toolbar = ttk.Frame(self)
-        toolbar.pack(fill="x", pady=(0, 5))
+        v = QVBoxLayout(self)
+        v.setSpacing(4)
 
-        self.read_btn = ttk.Button(toolbar, text="Read PATS Info", command=self._read_info)
-        self.read_btn.pack(side="left", padx=2)
+        # ── Toolbar ──
+        tb = QHBoxLayout()
+        self.read_btn = QPushButton("Read PATS Info")
+        self.read_btn.clicked.connect(self._read_info)
+        tb.addWidget(self.read_btn)
+        self.program_btn = QPushButton("Program Key")
+        self.program_btn.clicked.connect(self._program_key)
+        tb.addWidget(self.program_btn)
+        self.erase_btn = QPushButton("Erase All Keys")
+        self.erase_btn.clicked.connect(self._erase_keys)
+        tb.addWidget(self.erase_btn)
+        tb.addStretch(1)
+        v.addLayout(tb)
 
-        self.program_btn = ttk.Button(toolbar, text="Program Key", command=self._program_key)
-        self.program_btn.pack(side="left", padx=2)
+        self.status_label = QLabel("Connect to vehicle and read PATS info first")
+        v.addWidget(self.status_label)
 
-        self.erase_btn = ttk.Button(toolbar, text="Erase All Keys", command=self._erase_keys)
-        self.erase_btn.pack(side="left", padx=2)
+        # ── Calculator ──
+        calc = QGroupBox("Incode → Outcode Calculator (Offline)")
+        v.addWidget(calc)
+        g = QGridLayout(calc)
 
-        self.status_label = ttk.Label(self, text="Connect to vehicle and read PATS info first")
-        self.status_label.pack(fill="x", pady=5)
+        g.addWidget(QLabel("Incode (hex):"), 0, 0)
+        self.calc_incode = QLineEdit()
+        self.calc_incode.setFont(_mono())
+        self.calc_incode.setFixedWidth(160)
+        g.addWidget(self.calc_incode, 0, 1)
 
-        calc_frame = ttk.LabelFrame(self, text="Incode → Outcode Calculator (Offline)", padding=8)
-        calc_frame.pack(fill="x", padx=5, pady=(0, 5))
+        g.addWidget(QLabel("PATS Type:"), 0, 2)
+        self.calc_pats = QComboBox()
+        self.calc_pats.addItems(PATS_CHOICES)
+        self.calc_pats.setFixedWidth(180)
+        g.addWidget(self.calc_pats, 0, 3)
 
-        row_a = ttk.Frame(calc_frame)
-        row_a.pack(fill="x", pady=2)
+        g.addWidget(QLabel("Module ID (hex):"), 1, 0)
+        self.calc_modid = QLineEdit("0000")
+        self.calc_modid.setFont(_mono())
+        self.calc_modid.setFixedWidth(80)
+        g.addWidget(self.calc_modid, 1, 1)
 
-        ttk.Label(row_a, text="Incode (hex):").pack(side="left", padx=(0, 5))
-        self.calc_incode_var = tk.StringVar()
-        self.calc_incode_entry = ttk.Entry(
-            row_a, textvariable=self.calc_incode_var, width=20, font=("Consolas", 10),
-        )
-        self.calc_incode_entry.pack(side="left", padx=(0, 15))
+        g.addWidget(QLabel("Algo Variant:"), 1, 2)
+        self.calc_algo = QLineEdit("0")
+        self.calc_algo.setFont(_mono())
+        self.calc_algo.setFixedWidth(60)
+        g.addWidget(self.calc_algo, 1, 3)
 
-        ttk.Label(row_a, text="PATS Type:").pack(side="left", padx=(0, 5))
-        self.calc_pats_var = tk.StringVar(value="Auto (from vehicle)")
-        pats_choices = [
-            "Auto (from vehicle)",
-            "PATS I/II (1996-2005)",
-            "PATS III (2005-2010)",
-            "PATS IV/V (2010+)",
-        ]
-        self.calc_pats_combo = ttk.Combobox(
-            row_a, textvariable=self.calc_pats_var,
-            values=pats_choices, width=22, state="readonly",
-        )
-        self.calc_pats_combo.pack(side="left", padx=(0, 15))
+        self.calc_btn = QPushButton("Calculate Outcode")
+        self.calc_btn.clicked.connect(self._calc_outcode)
+        g.addWidget(self.calc_btn, 1, 4)
 
-        row_b = ttk.Frame(calc_frame)
-        row_b.pack(fill="x", pady=2)
+        g.addWidget(QLabel("Outcode:"), 1, 5)
+        self.calc_result = QLabel("----")
+        self.calc_result.setStyleSheet("font-family: Consolas, monospace; font-size: 14pt; font-weight: bold; color: #55ff55;")
+        g.addWidget(self.calc_result, 1, 6)
 
-        ttk.Label(row_b, text="Module ID (hex):").pack(side="left", padx=(0, 5))
-        self.calc_modid_var = tk.StringVar(value="0000")
-        ttk.Entry(
-            row_b, textvariable=self.calc_modid_var, width=8, font=("Consolas", 10),
-        ).pack(side="left", padx=(0, 15))
+        # ── Split: info | log ──
+        split = QSplitter(Qt.Orientation.Horizontal)
+        v.addWidget(split, stretch=1)
 
-        ttk.Label(row_b, text="Algo Variant:").pack(side="left", padx=(0, 5))
-        self.calc_algo_var = tk.StringVar(value="0")
-        ttk.Entry(
-            row_b, textvariable=self.calc_algo_var, width=6, font=("Consolas", 10),
-        ).pack(side="left", padx=(0, 15))
-
-        self.calc_btn = ttk.Button(row_b, text="Calculate Outcode", command=self._calc_outcode, width=20)
-        self.calc_btn.pack(side="left", padx=(10, 15))
-
-        ttk.Label(row_b, text="Outcode:").pack(side="left", padx=(0, 5))
-        self.calc_result_var = tk.StringVar(value="----")
-        ttk.Label(
-            row_b, textvariable=self.calc_result_var,
-            font=("Consolas", 14, "bold"), foreground="#55ff55",
-        ).pack(side="left")
-
-        paned = ttk.PanedWindow(self, orient="horizontal")
-        paned.pack(fill="both", expand=True)
-
-        left = ttk.LabelFrame(paned, text="PATS Configuration", padding=10)
-        paned.add(left, weight=1)
-
-        self.info_fields: dict[str, ttk.Label] = {}
+        info_box = QGroupBox("PATS Configuration")
+        info_grid = QGridLayout(info_box)
+        self.info_fields: dict[str, QLabel] = {}
         fields = [
             ("PATS Type", "pats_type"),
             ("PATS Enabled", "pats_enabled"),
@@ -103,35 +105,40 @@ class PATSPanel(ttk.Frame):
             ("PCM ID", "pcm_id"),
             ("Algorithm Variant", "algo_variant"),
         ]
+        for i, (label_text, name) in enumerate(fields):
+            lbl = QLabel(f"{label_text}:")
+            info_grid.addWidget(lbl, i, 0)
+            val = QLabel("--")
+            val.setFont(_mono())
+            info_grid.addWidget(val, i, 1)
+            self.info_fields[name] = val
+        info_grid.setColumnStretch(1, 1)
+        split.addWidget(info_box)
 
-        for i, (label_text, field_name) in enumerate(fields):
-            ttk.Label(left, text=f"{label_text}:").grid(row=i, column=0, sticky="w", pady=2, padx=(0, 10))
-            val_label = ttk.Label(left, text="--", font=("Consolas", 10))
-            val_label.grid(row=i, column=1, sticky="w", pady=2)
-            self.info_fields[field_name] = val_label
+        log_box = QGroupBox("Key Programming Log")
+        log_v = QVBoxLayout(log_box)
+        self.log_text = QPlainTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setFont(_mono(9))
+        log_v.addWidget(self.log_text)
+        split.addWidget(log_box)
+        split.setStretchFactor(0, 1)
+        split.setStretchFactor(1, 1)
 
-        right = ttk.LabelFrame(paned, text="Key Programming Log", padding=10)
-        paned.add(right, weight=1)
-
-        self.log_text = tk.Text(right, wrap="word", font=("Consolas", 9), state="disabled")
-        log_scroll = ttk.Scrollbar(right, orient="vertical", command=self.log_text.yview)
-        self.log_text.configure(yscrollcommand=log_scroll.set)
-
-        self.log_text.pack(side="left", fill="both", expand=True)
-        log_scroll.pack(side="right", fill="y")
+    # ── Calculator ──
 
     def _calc_outcode(self):
-        raw = self.calc_incode_var.get().strip().replace(" ", "")
+        raw = self.calc_incode.text().strip().replace(" ", "")
         if not raw:
-            messagebox.showwarning("Calculator", "Enter an incode value")
+            warn(self, "Calculator", "Enter an incode value")
             return
         try:
             incode_int = int(raw, 16)
         except ValueError:
-            messagebox.showwarning("Calculator", "Incode must be hex (e.g. A3F1)")
+            warn(self, "Calculator", "Incode must be hex (e.g. A3F1)")
             return
 
-        pats_sel = self.calc_pats_var.get()
+        pats_sel = self.calc_pats.currentText()
         if pats_sel.startswith("Auto"):
             if self.pats_manager and self.pats_manager.pats_info.pats_type > 0:
                 ptype = self.pats_manager.pats_info.pats_type
@@ -145,56 +152,52 @@ class PATSPanel(ttk.Frame):
             ptype = PATSType.PATS_4
 
         try:
-            mod_id = int(self.calc_modid_var.get().strip(), 16)
+            mod_id = int(self.calc_modid.text().strip(), 16)
         except ValueError:
             mod_id = 0
         try:
-            algo = int(self.calc_algo_var.get().strip())
+            algo = int(self.calc_algo.text().strip())
         except ValueError:
             algo = 0
 
         try:
             outcode = compute_incode(incode_int, ptype, mod_id, algo)
             if ptype in (PATSType.PATS_4, PATSType.PATS_5):
-                self.calc_result_var.set(f"{outcode:08X}")
+                self.calc_result.setText(f"{outcode:08X}")
             else:
-                self.calc_result_var.set(f"{outcode:04X}")
-            self._log(f"Incode 0x{raw.upper()} → Outcode 0x{self.calc_result_var.get()}  "
-                       f"(PATS {ptype}, mod=0x{mod_id:04X}, algo={algo})")
+                self.calc_result.setText(f"{outcode:04X}")
+            self._log(f"Incode 0x{raw.upper()} → Outcode 0x{self.calc_result.text()}  "
+                      f"(PATS {ptype}, mod=0x{mod_id:04X}, algo={algo})")
         except Exception as e:
-            self.calc_result_var.set("ERROR")
+            self.calc_result.setText("ERROR")
             self._log(f"Calculator error: {e}")
 
     def _log(self, message: str):
-        def _append():
-            self.log_text.config(state="normal")
-            self.log_text.insert("end", message + "\n")
-            self.log_text.see("end")
-            self.log_text.config(state="disabled")
-        self.after(0, _append)
+        self.after(0, lambda: self.log_text.appendPlainText(message))
+
+    # ── Info read ──
 
     def _read_info(self):
         vehicle = self.get_vehicle()
         if not vehicle:
             return
+        self.read_btn.setEnabled(False)
+        self.status_label.setText("Reading PATS configuration...")
 
-        self.read_btn.config(state="disabled")
-        self.status_label.config(text="Reading PATS configuration...")
-
-        def read_thread():
+        def thread():
             try:
                 self.pats_manager = PATSManager(vehicle)
-                info = self.pats_manager.read_pats_info()
-                self.after(0, lambda: self._display_info(info))
-                self.after(0, lambda: self.status_label.config(text="PATS info read successfully"))
+                info_val = self.pats_manager.read_pats_info()
+                self.after(0, lambda: self._display_info(info_val))
+                self.after(0, lambda: self.status_label.setText("PATS info read successfully"))
                 self._log("PATS configuration read successfully")
             except Exception as e:
-                self.after(0, lambda: self.status_label.config(text=f"Error: {e}"))
+                self.after(0, lambda: self.status_label.setText(f"Error: {e}"))
                 self._log(f"Error reading PATS: {e}")
             finally:
-                self.after(0, lambda: self.read_btn.config(state="normal"))
+                self.after(0, lambda: self.read_btn.setEnabled(True))
 
-        threading.Thread(target=read_thread, daemon=True).start()
+        run_thread(thread)
 
     def _display_info(self, info: PATSInfo):
         def fmt(val, special=None):
@@ -206,38 +209,39 @@ class PATSPanel(ttk.Frame):
                 return f"0x{val:04X}" if val > 0 else str(val)
             return str(val)
 
-        self.info_fields["pats_type"].config(
-            text=PATSManager.pats_type_name(info.pats_type)
-        )
-        self.info_fields["pats_enabled"].config(text=fmt(info.pats_enabled, "bool"))
-        self.info_fields["master_key"].config(text=fmt(info.master_key, "bool"))
-        self.info_fields["min_keys"].config(text=fmt(info.min_keys))
-        self.info_fields["num_keys_programmed"].config(text=fmt(info.num_keys_programmed))
-        self.info_fields["spare_key"].config(text=fmt(info.spare_key, "bool"))
-        self.info_fields["unlock_key"].config(text=fmt(info.unlock_key, "bool"))
-        self.info_fields["anti_scan"].config(text=fmt(info.anti_scan, "bool"))
-        self.info_fields["timed_delay"].config(text=fmt(info.timed_delay))
-        self.info_fields["cycle_key_time"].config(text=fmt(info.cycle_key_time))
-        self.info_fields["reset_type"].config(text=fmt(info.reset_type))
-        self.info_fields["pcm_id"].config(text=fmt(info.pcm_id, "hex"))
-        self.info_fields["algo_variant"].config(text=fmt(info.algo_variant))
+        self.info_fields["pats_type"].setText(PATSManager.pats_type_name(info.pats_type))
+        self.info_fields["pats_enabled"].setText(fmt(info.pats_enabled, "bool"))
+        self.info_fields["master_key"].setText(fmt(info.master_key, "bool"))
+        self.info_fields["min_keys"].setText(fmt(info.min_keys))
+        self.info_fields["num_keys_programmed"].setText(fmt(info.num_keys_programmed))
+        self.info_fields["spare_key"].setText(fmt(info.spare_key, "bool"))
+        self.info_fields["unlock_key"].setText(fmt(info.unlock_key, "bool"))
+        self.info_fields["anti_scan"].setText(fmt(info.anti_scan, "bool"))
+        self.info_fields["timed_delay"].setText(fmt(info.timed_delay))
+        self.info_fields["cycle_key_time"].setText(fmt(info.cycle_key_time))
+        self.info_fields["reset_type"].setText(fmt(info.reset_type))
+        self.info_fields["pcm_id"].setText(fmt(info.pcm_id, "hex"))
+        self.info_fields["algo_variant"].setText(fmt(info.algo_variant))
 
         if info.pcm_id > 0:
-            self.calc_modid_var.set(f"{info.pcm_id:04X}")
+            self.calc_modid.setText(f"{info.pcm_id:04X}")
         if info.algo_variant >= 0:
-            self.calc_algo_var.set(str(info.algo_variant))
+            self.calc_algo.setText(str(info.algo_variant))
         if info.pats_type > 0:
             pats_map = {1: "PATS I/II (1996-2005)", 2: "PATS I/II (1996-2005)",
                         3: "PATS III (2005-2010)", 4: "PATS IV/V (2010+)",
                         5: "PATS IV/V (2010+)"}
             label = pats_map.get(info.pats_type, "Auto (from vehicle)")
-            self.calc_pats_var.set(label)
+            idx = self.calc_pats.findText(label)
+            if idx >= 0:
+                self.calc_pats.setCurrentIndex(idx)
+
+    # ── Programming / erase ──
 
     def _program_key(self):
         if not self.pats_manager:
-            messagebox.showwarning("PATS", "Read PATS info first")
+            warn(self, "PATS", "Read PATS info first")
             return
-
         msg = (
             "KEY PROGRAMMING PROCEDURE\n\n"
             "1. Make sure you have the new key ready\n"
@@ -246,34 +250,30 @@ class PATSPanel(ttk.Frame):
             "4. Follow the on-screen instructions\n\n"
             "Continue?"
         )
-        if not messagebox.askyesno("Program Key", msg):
+        if not confirm(self, "Program Key", msg):
             return
+        self.program_btn.setEnabled(False)
+        self.erase_btn.setEnabled(False)
 
-        self.program_btn.config(state="disabled")
-        self.erase_btn.config(state="disabled")
-
-        def program_thread():
+        def thread():
             try:
                 self.pats_manager.program_key(callback=self._log)
                 self._log("Key programming sequence initiated successfully")
-                self.after(0, lambda: messagebox.showinfo(
-                    "Success",
-                    "Key learn initiated. Cycle the ignition with the new key now."
-                ))
+                self.after(0, lambda: info(self, "Success",
+                    "Key learn initiated. Cycle the ignition with the new key now."))
             except Exception as e:
                 self._log(f"Key programming failed: {e}")
-                self.after(0, lambda: messagebox.showerror("Failed", str(e)))
+                self.after(0, lambda: error(self, "Failed", str(e)))
             finally:
-                self.after(0, lambda: self.program_btn.config(state="normal"))
-                self.after(0, lambda: self.erase_btn.config(state="normal"))
+                self.after(0, lambda: self.program_btn.setEnabled(True))
+                self.after(0, lambda: self.erase_btn.setEnabled(True))
 
-        threading.Thread(target=program_thread, daemon=True).start()
+        run_thread(thread)
 
     def _erase_keys(self):
         if not self.pats_manager:
-            messagebox.showwarning("PATS", "Read PATS info first")
+            warn(self, "PATS", "Read PATS info first")
             return
-
         msg = (
             "WARNING: ERASE ALL KEYS\n\n"
             "This will erase ALL programmed keys from the vehicle.\n"
@@ -281,24 +281,30 @@ class PATSPanel(ttk.Frame):
             "If you lose all keys, the vehicle will not start.\n\n"
             "Are you absolutely sure?"
         )
-        if not messagebox.askyesno("Erase Keys", msg, icon="warning"):
+        if not confirm(self, "Erase Keys", msg):
             return
-        if not messagebox.askyesno("Final Confirmation",
-                                    "Last chance. Erase ALL keys?", icon="warning"):
+        if not confirm(self, "Final Confirmation", "Last chance. Erase ALL keys?"):
             return
+        self.program_btn.setEnabled(False)
+        self.erase_btn.setEnabled(False)
 
-        self.program_btn.config(state="disabled")
-        self.erase_btn.config(state="disabled")
-
-        def erase_thread():
+        def thread():
             try:
                 self.pats_manager.erase_keys(callback=self._log)
                 self._log("All keys erased successfully")
             except Exception as e:
                 self._log(f"Key erase failed: {e}")
-                self.after(0, lambda: messagebox.showerror("Failed", str(e)))
+                self.after(0, lambda: error(self, "Failed", str(e)))
             finally:
-                self.after(0, lambda: self.program_btn.config(state="normal"))
-                self.after(0, lambda: self.erase_btn.config(state="normal"))
+                self.after(0, lambda: self.program_btn.setEnabled(True))
+                self.after(0, lambda: self.erase_btn.setEnabled(True))
 
-        threading.Thread(target=erase_thread, daemon=True).start()
+        run_thread(thread)
+
+
+def _mono(size: int = 10):
+    from PyQt6.QtGui import QFont
+    f = QFont("Consolas")
+    f.setStyleHint(QFont.StyleHint.Monospace)
+    f.setPointSize(size)
+    return f
