@@ -630,14 +630,25 @@ class MechanicChat:
         self.messages = [{"role": "user", "content": opening}]
 
     def send_message(self, user_text: str) -> str:
+        issues_log.log_ai(f"send_message start ({len(user_text)} chars)")
         self.messages.append({"role": "user", "content": user_text})
+        t0 = time.time()
         try:
-            return self._run_tool_loop()
-        except anthropic.RateLimitError:
+            reply = self._run_tool_loop()
+            issues_log.log_ai(f"send_message done in {time.time() - t0:.2f}s ({len(reply)} chars)")
+            return reply
+        except anthropic.RateLimitError as e:
+            issues_log.log_error(f"AI rate limited: {e}", exc=e)
             return "The AI service is rate limited right now. Give it a minute and try again."
         except anthropic.APIStatusError as e:
-            return f"AI service error: {e.message}"
+            issues_log.log_error(
+                f"AI APIStatusError status={getattr(e, 'status_code', '?')} "
+                f"message={getattr(e, 'message', '?')}",
+                exc=e,
+            )
+            return f"AI service error ({getattr(e, 'status_code', '?')}): {e.message}"
         except RuntimeError as e:
+            issues_log.log_error(f"AI runtime error: {e}", exc=e)
             return str(e)
         except Exception as e:
             issues_log.log_exception("AI chat error", e, kind=issues_log.KIND_APP,
@@ -646,13 +657,24 @@ class MechanicChat:
 
     def kick_off(self) -> str:
         """Run the initial seeded user message and return the mechanic's reply."""
+        issues_log.log_ai("kick_off start")
+        t0 = time.time()
         try:
-            return self._run_tool_loop()
-        except anthropic.RateLimitError:
+            reply = self._run_tool_loop()
+            issues_log.log_ai(f"kick_off done in {time.time() - t0:.2f}s ({len(reply)} chars)")
+            return reply
+        except anthropic.RateLimitError as e:
+            issues_log.log_error(f"AI rate limited: {e}", exc=e)
             return "The AI service is rate limited right now. Give it a minute and try again."
         except anthropic.APIStatusError as e:
-            return f"AI service error: {e.message}"
+            issues_log.log_error(
+                f"AI APIStatusError status={getattr(e, 'status_code', '?')} "
+                f"message={getattr(e, 'message', '?')}",
+                exc=e,
+            )
+            return f"AI service error ({getattr(e, 'status_code', '?')}): {e.message}"
         except RuntimeError as e:
+            issues_log.log_error(f"AI runtime error: {e}", exc=e)
             return str(e)
         except Exception as e:
             issues_log.log_exception("AI chat error", e, kind=issues_log.KIND_APP,
@@ -667,37 +689,78 @@ class MechanicChat:
                 self._on_tool_call(name, params)
             except Exception:
                 pass
-        if name == "search_web":
-            return _search_web(params.get("query", ""))
-        if name == "fetch_page":
-            return _fetch_text(params.get("url", ""))
-        if name == "list_adapters":
-            return _list_adapters()
-        if name == "list_windows_serial_devices":
-            return _list_windows_serial_devices()
-        if name == "list_windows_usb_devices":
-            return _list_windows_usb_devices()
-        if name == "scan_local_network_obd":
-            return _scan_local_network_obd()
-        if name == "read_app_debug_log":
-            return _read_app_debug_log()
-        if name == "get_app_info":
-            return _get_app_info(self._state_provider)
-        if name == "log_issue":
-            return _log_issue(params)
-        return f"Unknown tool: {name}"
+        issues_log.log_ai(f"tool start: {name} params={params}")
+        t0 = time.time()
+        try:
+            if name == "search_web":
+                result = _search_web(params.get("query", ""))
+            elif name == "fetch_page":
+                result = _fetch_text(params.get("url", ""))
+            elif name == "list_adapters":
+                result = _list_adapters()
+            elif name == "list_windows_serial_devices":
+                result = _list_windows_serial_devices()
+            elif name == "list_windows_usb_devices":
+                result = _list_windows_usb_devices()
+            elif name == "scan_local_network_obd":
+                result = _scan_local_network_obd()
+            elif name == "read_app_debug_log":
+                result = _read_app_debug_log()
+            elif name == "get_app_info":
+                result = _get_app_info(self._state_provider)
+            elif name == "log_issue":
+                result = _log_issue(params)
+            else:
+                result = f"Unknown tool: {name}"
+        except Exception as e:
+            issues_log.log_error(f"tool {name} crashed", exc=e)
+            result = f"Tool {name} failed: {e.__class__.__name__}: {e}"
+        dt = time.time() - t0
+        issues_log.log_ai(
+            f"tool done:  {name} in {dt:.2f}s ({len(result)} chars)"
+        )
+        return result
 
     def _run_tool_loop(self, max_turns: int = 12) -> str:
         current_messages = list(self.messages)
         text_blocks: list[str] = []
 
-        for _ in range(max_turns):
-            response = self._get_client().messages.create(
-                model=MODEL,
-                max_tokens=4096,
-                system=SYSTEM_PROMPT,
-                tools=TOOLS,
-                messages=current_messages,
+        issues_log.log_ai(
+            f"loop start  model={MODEL} base={BASE_URL or 'default'} "
+            f"mode={'hosted' if USE_HOSTED_PROXY else 'local'} msgs={len(current_messages)}"
+        )
+
+        for turn in range(max_turns):
+            t0 = time.time()
+            issues_log.log_ai(f"turn {turn + 1}/{max_turns} -> messages.create ({len(current_messages)} msgs)")
+            try:
+                response = self._get_client().messages.create(
+                    model=MODEL,
+                    max_tokens=4096,
+                    system=SYSTEM_PROMPT,
+                    tools=TOOLS,
+                    messages=current_messages,
+                )
+            except anthropic.APIStatusError as e:
+                issues_log.log_error(
+                    f"turn {turn + 1} APIStatusError status={e.status_code} body={getattr(e, 'body', '?')!r}"
+                )
+                raise
+            except Exception as e:
+                issues_log.log_error(f"turn {turn + 1} exception {e.__class__.__name__}", exc=e)
+                raise
+            dt = time.time() - t0
+            usage = getattr(response, "usage", None)
+            usage_str = ""
+            if usage is not None:
+                usage_str = (
+                    f" in={getattr(usage, 'input_tokens', '?')} "
+                    f"out={getattr(usage, 'output_tokens', '?')}"
+                )
+            block_types = [getattr(b, "type", "?") for b in response.content]
+            issues_log.log_ai(
+                f"turn {turn + 1} <- {dt:.2f}s stop={response.stop_reason} "
+                f"blocks={block_types}{usage_str}"
             )
 
             tool_uses = []

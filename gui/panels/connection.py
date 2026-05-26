@@ -1,5 +1,4 @@
 import subprocess
-import tempfile
 import traceback
 from typing import Callable, Optional
 
@@ -15,14 +14,9 @@ from modules import issues_log
 
 
 def _log(msg: str) -> None:
+    """Mirror connection-panel events into the single app log file."""
     try:
-        with open(tempfile.gettempdir() + "/fuse_debug.log", "a") as f:
-            f.write(msg + "\n")
-    except Exception:
-        pass
-    # Mirror into the AI-readable debug log so the AI Mechanic can introspect.
-    try:
-        issues_log.log_app_event(msg)
+        issues_log.log_connection(msg)
     except Exception:
         pass
 

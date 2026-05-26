@@ -1,15 +1,28 @@
-"""Persistent log of issues — vehicle faults, app errors, connection problems.
+"""Persistent log of issues + every byte of comms the app sees.
 
-The log lives at %LOCALAPPDATA%/FuseOBD/issues.json and is appended to
-every time the AI Mechanic, or the app itself, encounters something
-worth remembering. Each entry carries two descriptions: a plain-English
-one ("dummy") and a technical one ("nerd") so the user can drill in at
-whatever depth they like.
+Log location (in order of preference):
+  1. Same folder as the EXE (PyInstaller frozen build) or repo root (dev)
+  2. %LOCALAPPDATA%/FuseOBD/ as a fallback if the app folder is read-only
+     (e.g. installed under Program Files without admin)
+
+Two files live in that folder:
+  - fuse_obd.log    — chronological tail of EVERY interesting event:
+                      OBD bytes TX/RX, adapter init, connection state,
+                      AI Mechanic activity, errors, exceptions.
+                      This is the file the user opens when something
+                      goes wrong.
+  - issues.json     — structured issues that the AI Mechanic surfaces
+                      in the right-hand pane of its window.
+
+Each Issue carries two descriptions — a plain-English one ("dummy") and
+a technical one ("nerd") — so the user can drill in at whatever depth
+they like.
 """
 from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -21,14 +34,49 @@ from typing import Optional
 
 # ── Storage location ──
 
-def _log_dir() -> str:
-    base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or tempfile.gettempdir()
-    path = os.path.join(base, "FuseOBD")
+_DIR_CACHE: Optional[str] = None
+
+
+def _app_dir() -> str:
+    """Folder the user thinks of as 'where the app lives'.
+
+    PyInstaller one-file builds: directory of sys.executable.
+    Dev (running app.py): parent of this module's package.
+    """
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+
+
+def _writable(path: str) -> bool:
     try:
         os.makedirs(path, exist_ok=True)
+        probe = os.path.join(path, ".write_probe")
+        with open(probe, "w") as f:
+            f.write("ok")
+        os.remove(probe)
+        return True
     except OSError:
-        path = tempfile.gettempdir()
-    return path
+        return False
+
+
+def _log_dir() -> str:
+    """App-folder first, %LOCALAPPDATA% as last resort."""
+    global _DIR_CACHE
+    if _DIR_CACHE:
+        return _DIR_CACHE
+    primary = _app_dir()
+    if _writable(primary):
+        _DIR_CACHE = primary
+        return primary
+    base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or tempfile.gettempdir()
+    fallback = os.path.join(base, "FuseOBD")
+    try:
+        os.makedirs(fallback, exist_ok=True)
+    except OSError:
+        fallback = tempfile.gettempdir()
+    _DIR_CACHE = fallback
+    return fallback
 
 
 def issues_log_path() -> str:
@@ -36,11 +84,13 @@ def issues_log_path() -> str:
 
 
 def app_debug_log_path() -> str:
-    """Co-located with the issues log so the AI can read it easily."""
-    return os.path.join(_log_dir(), "app_debug.log")
+    """Single chronological log file the user opens to see what happened."""
+    return os.path.join(_log_dir(), "fuse_obd.log")
 
 
 _lock = threading.Lock()
+_file_lock = threading.Lock()
+_session_announced = False
 
 
 # ── Records ──
@@ -187,20 +237,148 @@ def remove_issue(issue_id: str) -> bool:
 
 
 # ── App debug logging ──
+#
+# Single chronological log file: fuse_obd.log (next to the EXE).
+# Categories use a 4-letter tag for fast grep:
+#
+#   [APP ] generic app events / lifecycle
+#   [ERR ] caught exceptions / errors
+#   [ADPT] adapter discovery / init / open / close
+#   [CONN] connection state changes (vehicle handshake, module wakeup)
+#   [TX  ] bytes sent to the adapter / vehicle
+#   [RX  ] bytes received from the adapter / vehicle
+#   [PROT] protocol-level events (CAN frames, ISO-TP, UDS sessions)
+#   [AI  ] AI Mechanic activity (turns, tools, latency, model)
+#   [HTTP] outbound HTTP/HTTPS calls (updater, AI proxy)
+#   [GUI ] window open/close, button clicks worth tracing
+#
+# Lines all start with "YYYY-MM-DD HH:MM:SS.mmm [TAG ] " for easy parsing.
 
-def log_app_event(message: str, *, exc: Optional[BaseException] = None) -> None:
-    """Append a free-form line to the app debug log.
+_MAX_LOG_BYTES = 16 * 1024 * 1024  # 16 MB cap; rotated to fuse_obd.log.1
+_log_warned_once = False
 
-    Used by error capture so the AI Mechanic can read recent failures.
-    """
+
+def _now() -> str:
+    t = time.time()
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t)) + f".{int((t % 1) * 1000):03d}"
+
+
+def _rotate_if_needed(path: str) -> None:
     try:
-        line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n"
-        if exc is not None:
-            line += "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-        with open(app_debug_log_path(), "a", encoding="utf-8") as f:
-            f.write(line)
+        if os.path.exists(path) and os.path.getsize(path) > _MAX_LOG_BYTES:
+            backup = path + ".1"
+            try:
+                if os.path.exists(backup):
+                    os.remove(backup)
+            except OSError:
+                pass
+            os.replace(path, backup)
     except OSError:
         pass
+
+
+def _announce_session(f) -> None:
+    """Write a banner the first time the log is touched this run."""
+    global _session_announced
+    if _session_announced:
+        return
+    _session_announced = True
+    try:
+        from version import VERSION
+    except Exception:
+        VERSION = "?"
+    sep = "=" * 76
+    banner = (
+        f"\n{sep}\n"
+        f"  Fuse OBD v{VERSION} — session started {_now()}\n"
+        f"  Python {sys.version.split()[0]} on {sys.platform}\n"
+        f"  Executable: {sys.executable}\n"
+        f"  Log file:   {app_debug_log_path()}\n"
+        f"{sep}\n"
+    )
+    f.write(banner)
+
+
+def _write_log_line(tag: str, message: str) -> None:
+    global _log_warned_once
+    path = app_debug_log_path()
+    try:
+        _rotate_if_needed(path)
+        with _file_lock:
+            with open(path, "a", encoding="utf-8") as f:
+                _announce_session(f)
+                f.write(f"{_now()} [{tag:<4}] {message}\n")
+    except OSError as e:
+        if not _log_warned_once:
+            _log_warned_once = True
+            sys.stderr.write(f"[issues_log] cannot write {path}: {e}\n")
+
+
+def log_app_event(message: str, *, exc: Optional[BaseException] = None) -> None:
+    """Generic event line. Kept for backward compat with existing callers."""
+    _write_log_line("APP", message)
+    if exc is not None:
+        tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        for line in tb.rstrip().splitlines():
+            _write_log_line("ERR", line)
+
+
+def log_error(message: str, *, exc: Optional[BaseException] = None) -> None:
+    _write_log_line("ERR", message)
+    if exc is not None:
+        tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        for line in tb.rstrip().splitlines():
+            _write_log_line("ERR", line)
+
+
+def log_adapter(message: str) -> None:
+    _write_log_line("ADPT", message)
+
+
+def log_connection(message: str) -> None:
+    _write_log_line("CONN", message)
+
+
+def log_protocol(message: str) -> None:
+    _write_log_line("PROT", message)
+
+
+def log_ai(message: str) -> None:
+    _write_log_line("AI", message)
+
+
+def log_http(message: str) -> None:
+    _write_log_line("HTTP", message)
+
+
+def log_gui(message: str) -> None:
+    _write_log_line("GUI", message)
+
+
+def _format_bytes(data: bytes, max_show: int = 64) -> str:
+    if not data:
+        return "(empty)"
+    hex_part = data[:max_show].hex().upper()
+    # group bytes in pairs for readability
+    grouped = " ".join(hex_part[i:i + 2] for i in range(0, len(hex_part), 2))
+    truncated = "" if len(data) <= max_show else f" ...[+{len(data) - max_show}B]"
+    try:
+        ascii_part = data[:max_show].decode("ascii", errors="replace")
+        # collapse control chars to dots so the log stays one line
+        ascii_part = "".join(c if 32 <= ord(c) < 127 else "." for c in ascii_part)
+    except Exception:
+        ascii_part = ""
+    return f"{len(data)}B  {grouped}{truncated}  |{ascii_part}|"
+
+
+def log_tx(target: str, data: bytes) -> None:
+    """Every byte sent toward an adapter or vehicle."""
+    _write_log_line("TX", f"{target}  {_format_bytes(data)}")
+
+
+def log_rx(source: str, data: bytes) -> None:
+    """Every byte received from an adapter or vehicle."""
+    _write_log_line("RX", f"{source}  {_format_bytes(data)}")
 
 
 def read_app_debug_tail(max_chars: int = 8000) -> str:

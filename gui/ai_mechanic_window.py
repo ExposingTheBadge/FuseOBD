@@ -9,6 +9,8 @@ The window:
 """
 from __future__ import annotations
 
+import os
+import sys
 import threading
 from html import escape
 from typing import Callable, Optional
@@ -255,6 +257,18 @@ class AIMechanicWindow(QMainWindow):
         self.mode_badge.mousePressEvent = lambda _e: self._open_config_diagnostic()
         head.addWidget(self.mode_badge)
         head.addStretch(1)
+        self.open_log_btn = QPushButton("Open Log File")
+        self.open_log_btn.setStyleSheet(
+            "QPushButton { background:#1f1f1f; color:#cfcfcf; border:1px solid #444; "
+            "padding:3px 10px; border-radius:6px; font-size:9pt; }"
+            "QPushButton:hover { background:#2a2a2a; color:#fff; }"
+        )
+        self.open_log_btn.setToolTip(
+            "Open fuse_obd.log — every adapter byte, error, AI turn, and event "
+            "the app has seen this session."
+        )
+        self.open_log_btn.clicked.connect(self._open_log_file)
+        head.addWidget(self.open_log_btn)
         self.status_label = QLabel("")
         self.status_label.setStyleSheet("color:#ffaa00;")
         head.addWidget(self.status_label)
@@ -413,6 +427,10 @@ class AIMechanicWindow(QMainWindow):
 
     def _start_chat_session(self, vehicle_info: Optional[dict],
                             dtc_data: Optional[list]):
+        issues_log.log_gui(
+            f"AI Mechanic session start vehicle={bool(vehicle_info)} "
+            f"dtcs={len(dtc_data) if dtc_data else 0}"
+        )
         self._clear_bubbles()
         self._append_bubble("system", "Starting AI Mechanic session...")
         self.status_label.setText("Connecting...")
@@ -541,6 +559,25 @@ class AIMechanicWindow(QMainWindow):
     def _open_config_diagnostic(self):
         dlg = _ConfigDiagnosticDialog(diagnose_config(), self)
         dlg.exec()
+
+    def _open_log_file(self):
+        """Open fuse_obd.log in the user's default text editor."""
+        path = issues_log.app_debug_log_path()
+        if not os.path.exists(path):
+            # Force-create with a banner so the user sees something useful.
+            issues_log.log_app_event("user opened log file (empty until now)")
+        try:
+            if sys.platform == "win32":
+                os.startfile(path)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                import subprocess
+                subprocess.Popen(["open", path])
+            else:
+                import subprocess
+                subprocess.Popen(["xdg-open", path])
+        except Exception as e:
+            QMessageBox.warning(self, "Could not open log",
+                                f"Log path: {path}\n\n{e}")
 
     # ── issues pane ──
 
