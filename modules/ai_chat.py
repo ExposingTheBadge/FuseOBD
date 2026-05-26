@@ -1,36 +1,92 @@
-"""AI Mechanic Chat — interactive diagnostic assistant with web search capability."""
+"""AI Mechanic Chat — interactive diagnostic assistant.
+
+The mechanic can:
+  • answer free-form questions about a connected vehicle (or no vehicle at all)
+  • search the web and read pages for TSBs, forum posts and repair guides
+  • inspect the host PC for J2534 / USB / Bluetooth / WiFi OBD adapters
+  • read Fuse OBD's own debug log to self-diagnose problems with the app
+  • record findings into a persistent issues log that the UI displays
+
+All AI credentials are read from MOD_-prefixed environment variables so the
+AI Mechanic is configured independently from any other Anthropic clients in
+the application:
+
+    MOD_AUTH_TOKEN          – primary API key (fallback: MOD_API_KEY)
+    MOD_BASE_URL            – optional custom base URL
+    MOD_MODEL               – override model id
+    MOD_DEFAULT_OPUS_MODEL  – default model (fallback)
+"""
+from __future__ import annotations
+
 import os
 import json
-import urllib.request
-import urllib.parse
-import urllib.error
-import ssl
+import platform
 import re
+import socket
+import ssl
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
 import anthropic
 
-AUTH_TOKEN = os.environ.get("ANTHROPIC_AUTH_TOKEN") or os.environ.get("ANTHROPIC_API_KEY", "")
-BASE_URL = os.environ.get("ANTHROPIC_BASE_URL", "")
+from modules import issues_log
+
+# ── Configuration ──────────────────────────────────────────────────────────
+
+AUTH_TOKEN = (
+    os.environ.get("MOD_AUTH_TOKEN")
+    or os.environ.get("MOD_API_KEY")
+    or ""
+)
+BASE_URL = os.environ.get("MOD_BASE_URL", "")
 MODEL = (
-    os.environ.get("ANTHROPIC_MODEL")
-    or os.environ.get("ANTHROPIC_DEFAULT_OPUS_MODEL")
+    os.environ.get("MOD_MODEL")
+    or os.environ.get("MOD_DEFAULT_OPUS_MODEL")
     or "claude-opus-4-7"
 )
 
+
 SYSTEM_PROMPT = """You are a master automotive diagnostician with 30 years of hands-on experience across ALL vehicle makes — Ford, GM, Toyota, Honda, BMW, Mercedes, VW, Hyundai, Kia, Nissan, Chrysler, Subaru, Mazda, Volvo, Land Rover, and everything else. You work on cars every day. You think like a mechanic, not a computer.
 
-## Your tools:
+You also moonlight as the support engineer for the Fuse OBD app itself. When the user is having trouble *with the app or the OBD adapter* (connections failing, no adapter found, the app threw an error, etc.), you switch hats and help them debug Fuse OBD — by inspecting Windows devices, reading the app debug log, listing adapters, and offering concrete next steps. You never refuse to help because "no vehicle is connected"; you help them get connected.
+
+## Your tools
 You can use these tools to gather information before answering:
+
+Vehicle / web research:
 - **search_web(query)** — Search the internet for TSBs, forum discussions, repair guides, common fixes for specific DTCs. Use this before giving diagnostic advice — real mechanics look things up constantly.
 - **fetch_page(url)** — Fetch content from a specific web page (forum post, repair guide, TSB). Use this when search results look promising and you want details.
 
-## How you diagnose:
+App / hardware diagnostics:
+- **list_adapters()** — List every OBD adapter Fuse OBD can currently see (J2534, USB serial, paired Bluetooth, manually added WiFi). Use this whenever the user can't connect.
+- **list_windows_serial_devices()** — Query Windows for every serial-class device, including ones Fuse OBD did NOT recognise as an OBD adapter. Helps spot driver problems and missing PIDs.
+- **list_windows_usb_devices()** — Pull a generic USB device list from Windows (helpful when an adapter is plugged in but no COM port appeared).
+- **scan_local_network_obd()** — Probe the local subnet for WiFi ELM327 adapters (commonly 192.168.0.10:35000 / 192.168.4.1:35000 / 192.168.1.5:35000 ranges). Slow — only call if the user is on WiFi.
+- **read_app_debug_log()** — Read the tail of Fuse OBD's own debug log. Use this when something inside the app misbehaved.
+- **get_app_info()** — Return the app version, Python version, OS, working directory and current connection state.
+
+Persistent record:
+- **log_issue(title, kind, severity, summary_simple, summary_technical)** — Append an entry to the persistent Issues list (right-hand pane in the AI Mechanic window). Use this whenever you identify a concrete problem — both for vehicle faults and for app/adapter problems. `kind` is one of: vehicle, app, connection, info. `severity` is one of: low, medium, high, critical. Always write *summary_simple* in plain English ("for dummies") and *summary_technical* with the gory details ("for nerds").
+
+## How you diagnose a vehicle
 1. Look at the fault codes AS A SYSTEM, not individually. A single bad ground or weak battery can throw 20 codes across 8 modules.
 2. Check for CAN bus communication errors (U-codes) — these often trace to one module going offline, which cascades to every module that talks to it.
 3. Look at freeze frame data (if available) — what were the conditions when the fault set?
 4. Consider the vehicle's age, mileage, known issues for that make/model/year.
 5. Search for TSBs and common fixes for the specific codes on the specific vehicle.
 
-## Response style:
+## How you diagnose Fuse OBD itself
+1. Call get_app_info first — establish what version they're on and whether a vehicle is connected.
+2. If they can't see an adapter, call list_adapters, then list_windows_serial_devices, then list_windows_usb_devices in that order.
+3. If the app threw an error, call read_app_debug_log and look at the bottom 50 lines.
+4. Recommend concrete clicks ("open Windows Device Manager → look for FT232R USB UART under Ports (COM & LPT) — does it have a yellow ! triangle?").
+5. Log every distinct issue you confirm via log_issue so the user has a record.
+
+## Response style
 - Talk like a real mechanic — plain English, no corporate speak
 - Tell the owner what's actually wrong and what's just noise
 - Give repair difficulty estimates (driveway job vs. need a lift vs. dealer-only)
@@ -38,23 +94,27 @@ You can use these tools to gather information before answering:
 - If you search the web, incorporate what you find into your diagnosis
 - Be honest when something needs a professional — don't pretend everything is DIY
 
-## When answering:
+## When answering
 - Reference specific fault codes by number
 - Explain the "why" behind your diagnosis
 - If multiple codes trace to one root cause, explain the cascade
 - Give the owner a prioritized list: fix this first, then this, then this"""
 
 
+# ── Web tools ──────────────────────────────────────────────────────────────
+
+
 def _fetch_text(url: str, timeout: float = 8.0) -> str:
-    """Fetch text content from a URL."""
+    """Fetch text content from a URL, stripped of HTML."""
     ctx = ssl.create_default_context()
     req = urllib.request.Request(url, headers={
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/120.0.0.0 Safari/537.36"
     })
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
             raw = resp.read()
-            # Try to decode
             content_type = resp.headers.get("Content-Type", "")
             charset = "utf-8"
             if "charset=" in content_type:
@@ -63,151 +123,419 @@ def _fetch_text(url: str, timeout: float = 8.0) -> str:
                 text = raw.decode(charset, errors="replace")
             except Exception:
                 text = raw.decode("utf-8", errors="replace")
-            # Strip HTML tags for Claude consumption
             text = re.sub(r"<script[^>]*>.*?</script>", "", text, flags=re.DOTALL | re.IGNORECASE)
             text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
             text = re.sub(r"<[^>]+>", " ", text)
             text = re.sub(r"\s+", " ", text).strip()
-            return text[:8000]  # Limit to 8K chars
+            return text[:8000]
     except Exception as e:
-        return f"Error fetching {url}: {str(e)}"
+        return f"Error fetching {url}: {e}"
 
 
 def _search_web(query: str) -> str:
-    """Search the web using DuckDuckGo and return results."""
+    """Search the web via DuckDuckGo HTML endpoint."""
     try:
         encoded = urllib.parse.quote(query)
         url = f"https://html.duckduckgo.com/html/?q={encoded}"
         html = _fetch_text(url, timeout=10)
-
-        # Extract result snippets
         results = []
-        # Match DDG result blocks
         for match in re.finditer(r'class="result__snippet"[^>]*>(.*?)</a>', html, re.DOTALL):
             results.append(re.sub(r"<[^>]+>", "", match.group(1)).strip())
-
         if not results:
-            # Try alternate extraction
             for match in re.finditer(r'class="result__body"[^>]*>(.*?)</a>', html, re.DOTALL):
                 results.append(re.sub(r"<[^>]+>", "", match.group(1)).strip())
-
         if not results:
-            # Try generic snippet extraction
             snippets = re.findall(r'class="[^"]*snippet[^"]*"[^>]*>(.*?)</', html, re.DOTALL)
             results = [re.sub(r"<[^>]+>", "", s).strip() for s in snippets if len(s) > 50]
-
         if not results:
             return f"No search results found for: {query}"
-
-        return "\n\n".join(results[:5])  # Top 5 results
+        return "\n\n".join(results[:5])
     except Exception as e:
-        return f"Search error: {str(e)}"
+        return f"Search error: {e}"
 
 
-# Tool definitions for Claude API
+# ── App / hardware diagnostic tools ────────────────────────────────────────
+
+
+def _safe_call(fn, default):
+    try:
+        return fn()
+    except Exception as e:
+        return f"{default} (error: {e})"
+
+
+def _list_adapters() -> str:
+    try:
+        from core.j2534 import enumerate_devices
+        devices = enumerate_devices()
+    except Exception as e:
+        return f"Could not enumerate adapters: {e}"
+    if not devices:
+        return ("No adapters detected by Fuse OBD.\n"
+                "  • No J2534 PassThru DLL registered in HKLM\\SOFTWARE\\PassThruSupport.04.04\n"
+                "  • No USB serial ports detected (FTDI / CH340 / CP210x / Prolific)\n"
+                "  • No WiFi adapter manually added\n"
+                "  • No paired Bluetooth OBD adapter selected\n"
+                "Possible next steps: check Windows Device Manager for the adapter, "
+                "install or re-install the J2534 driver, or pair the BT adapter in Windows first.")
+    lines = [f"Fuse OBD detected {len(devices)} adapter(s):"]
+    for i, d in enumerate(devices, 1):
+        kind = "WiFi" if d.is_wifi else ("Serial/ELM327" if d.is_serial else "J2534 PassThru")
+        if d.is_wifi:
+            extra = f"host={d.host} port={d.tcp_port}"
+        elif d.is_serial:
+            extra = f"port={d.port}"
+        else:
+            extra = f"dll={d.dll_path}"
+        lines.append(f"  {i}. [{kind}] {d.name}  vendor={d.vendor}  {extra}")
+    return "\n".join(lines)
+
+
+def _list_windows_serial_devices() -> str:
+    if sys.platform != "win32":
+        return "Not running on Windows."
+    ps = (
+        "Get-PnpDevice -Class Ports -Status OK,Error -ErrorAction SilentlyContinue | "
+        "Select-Object Status,FriendlyName,InstanceId,Manufacturer | "
+        "Format-List | Out-String -Width 200"
+    )
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps],
+            capture_output=True, text=True, timeout=15
+        )
+        text = (out.stdout or out.stderr or "").strip()
+        return text[:4000] or "No serial-class devices reported."
+    except Exception as e:
+        return f"Error querying Device Manager: {e}"
+
+
+def _list_windows_usb_devices() -> str:
+    if sys.platform != "win32":
+        return "Not running on Windows."
+    ps = (
+        "Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | "
+        "Where-Object { $_.InstanceId -like 'USB\\*' } | "
+        "Select-Object Status,FriendlyName,InstanceId | "
+        "Sort-Object FriendlyName | Format-List | Out-String -Width 200"
+    )
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps],
+            capture_output=True, text=True, timeout=15
+        )
+        text = (out.stdout or out.stderr or "").strip()
+        return text[:4000] or "No USB devices reported."
+    except Exception as e:
+        return f"Error querying Device Manager: {e}"
+
+
+def _scan_local_network_obd() -> str:
+    """Probe a few common WiFi ELM327 default IPs/ports."""
+    candidates = [
+        ("192.168.0.10", 35000),
+        ("192.168.0.10", 23),
+        ("192.168.4.1", 35000),
+        ("192.168.1.5", 35000),
+        ("192.168.4.1", 23),
+        ("192.168.0.1", 35000),
+    ]
+    hits = []
+    misses = []
+    for host, port in candidates:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(0.6)
+            s.connect((host, port))
+            s.close()
+            hits.append(f"  ✓ {host}:{port} responded")
+        except Exception as e:
+            misses.append(f"  · {host}:{port} no response ({e.__class__.__name__})")
+    out = ["WiFi ELM327 scan results:"]
+    out.extend(hits or ["  (no candidate WiFi adapter answered on the usual IPs)"])
+    out.append("")
+    out.append("Probed:")
+    out.extend(misses)
+    out.append("")
+    out.append("Tip: a WiFi OBD adapter usually creates its own SSID. "
+               "Connect Windows to that SSID first, then probe again.")
+    return "\n".join(out)
+
+
+def _read_app_debug_log() -> str:
+    tail = issues_log.read_app_debug_tail(8000)
+    return tail or "(empty)"
+
+
+def _get_app_info(state_provider) -> str:
+    try:
+        from version import VERSION, APP_NAME, APP_DESC
+    except Exception:
+        VERSION = APP_NAME = APP_DESC = "?"
+    info = {
+        "app_name": APP_NAME,
+        "app_desc": APP_DESC,
+        "app_version": VERSION,
+        "python": sys.version.split()[0],
+        "os": f"{platform.system()} {platform.release()} ({platform.machine()})",
+        "cwd": os.getcwd(),
+        "issues_log": issues_log.issues_log_path(),
+        "app_debug_log": issues_log.app_debug_log_path(),
+    }
+    if state_provider is not None:
+        try:
+            info.update(state_provider() or {})
+        except Exception as e:
+            info["state_provider_error"] = str(e)
+    return json.dumps(info, indent=2)
+
+
+def _log_issue(args: dict) -> str:
+    kind = (args.get("kind") or issues_log.KIND_INFO).lower()
+    severity = (args.get("severity") or issues_log.SEVERITY_LOW).lower()
+    valid_kinds = {issues_log.KIND_VEHICLE, issues_log.KIND_APP,
+                   issues_log.KIND_CONNECTION, issues_log.KIND_INFO}
+    valid_sev = {issues_log.SEVERITY_LOW, issues_log.SEVERITY_MED,
+                 issues_log.SEVERITY_HIGH, issues_log.SEVERITY_CRIT}
+    if kind not in valid_kinds:
+        kind = issues_log.KIND_INFO
+    if severity not in valid_sev:
+        severity = issues_log.SEVERITY_LOW
+    issue = issues_log.add_issue(
+        title=args.get("title") or "Untitled",
+        kind=kind,
+        severity=severity,
+        summary_simple=args.get("summary_simple") or "",
+        summary_technical=args.get("summary_technical") or "",
+        source="ai_mechanic",
+        context=args.get("context") or {},
+    )
+    return f"Logged issue '{issue.title}' [{issue.kind}/{issue.severity}] id={issue.id}"
+
+
+# ── Tool definitions ───────────────────────────────────────────────────────
+
+
 TOOLS = [
     {
         "name": "search_web",
-        "description": "Search the internet for automotive diagnostic information, TSBs, forum discussions, repair guides, and common fixes. Use this to find real-world repair data for specific DTCs, vehicle issues, and diagnostic procedures.",
+        "description": "Search the internet for automotive diagnostic information, TSBs, forum discussions, repair guides, and common fixes.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "The search query. Be specific — include the DTC code, vehicle make/model/year, and symptom. Example: 'P0420 Toyota Camry 2018 catalytic converter TSB' or 'Ford F150 P0300 misfire common causes forum'"
-                }
+                "query": {"type": "string", "description": "Specific search query. Include DTC code, make/model/year, and symptom."}
             },
-            "required": ["query"]
-        }
+            "required": ["query"],
+        },
     },
     {
         "name": "fetch_page",
-        "description": "Fetch and read the content of a specific web page. Use this when search results show a promising forum post, repair guide article, or TSB page that you want to read in detail.",
+        "description": "Fetch and read the content of a specific web page (forum post, TSB, repair guide).",
+        "input_schema": {
+            "type": "object",
+            "properties": {"url": {"type": "string", "description": "Full URL to fetch."}},
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "list_adapters",
+        "description": "List every OBD adapter Fuse OBD can currently see: J2534, USB serial, paired Bluetooth, manually added WiFi.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "list_windows_serial_devices",
+        "description": "Query Windows for all serial-class (Ports COM & LPT) devices, including ones Fuse OBD did not classify as an OBD adapter.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "list_windows_usb_devices",
+        "description": "Query Windows for present USB devices. Helps spot a plugged-in adapter that didn't get a COM port.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "scan_local_network_obd",
+        "description": "Probe common WiFi ELM327 default IPs/ports to detect a wireless OBD adapter on the local subnet.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "read_app_debug_log",
+        "description": "Read the tail of Fuse OBD's own debug log file — use this when the user reports the app crashed or behaved strangely.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "get_app_info",
+        "description": "Return Fuse OBD's version, the Python/OS info, working dir, and current connection state.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "log_issue",
+        "description": "Append a finding to the persistent Issues log so the user sees it in the side pane. Always provide BOTH a plain-English summary and a technical summary.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "url": {
-                    "type": "string",
-                    "description": "The full URL of the page to fetch"
-                }
+                "title": {"type": "string", "description": "Short title (e.g. 'PCM not responding', 'P0420 — catalytic efficiency')."},
+                "kind": {"type": "string", "enum": ["vehicle", "app", "connection", "info"], "description": "Category of issue."},
+                "severity": {"type": "string", "enum": ["low", "medium", "high", "critical"], "description": "How urgent / dangerous."},
+                "summary_simple": {"type": "string", "description": "Plain English explanation 'for dummies'."},
+                "summary_technical": {"type": "string", "description": "Technical details 'for nerds' — codes, registers, hex dumps, registry paths, traces."},
+                "context": {"type": "object", "description": "Optional free-form context."},
             },
-            "required": ["url"]
-        }
-    }
+            "required": ["title", "summary_simple", "summary_technical"],
+        },
+    },
 ]
 
 
-class MechanicChat:
-    """Interactive AI mechanic with web search and tool use."""
+# ── Chat session ───────────────────────────────────────────────────────────
 
-    def __init__(self):
-        self.messages = []
-        self.vehicle_info = {}
-        self.dtc_data = []
+
+class MechanicChat:
+    """Interactive AI mechanic with web search, app self-diagnostics and tool use."""
+
+    def __init__(self, state_provider=None, on_tool_call=None):
+        """
+        state_provider: optional callable returning a dict describing the
+            host app state (whether a vehicle is connected, current VIN,
+            adapter info, etc). Surfaced to the model via get_app_info().
+        on_tool_call: optional callable(tool_name, summary) for UI status.
+        """
+        self.messages: list[dict] = []
+        self.vehicle_info: dict = {}
+        self.dtc_data: list = []
         self._client = None
+        self._state_provider = state_provider
+        self._on_tool_call = on_tool_call
+
+    # ── credentials / client ──
+
+    @staticmethod
+    def is_configured() -> bool:
+        return bool(AUTH_TOKEN)
 
     def _get_client(self):
         if self._client is None:
+            if not AUTH_TOKEN:
+                raise RuntimeError(
+                    "No AI auth token configured. Set MOD_AUTH_TOKEN "
+                    "(or MOD_API_KEY) in Windows system environment variables."
+                )
             kwargs = {"api_key": AUTH_TOKEN, "timeout": 120.0}
             if BASE_URL:
                 kwargs["base_url"] = BASE_URL
             self._client = anthropic.Anthropic(**kwargs)
         return self._client
 
-    def start_session(self, vehicle_info: dict, dtc_data: list):
-        """Start a new diagnostic session with vehicle context."""
-        self.vehicle_info = vehicle_info
-        self.dtc_data = dtc_data
+    # ── session lifecycle ──
+
+    def start_session(self, vehicle_info: dict | None = None, dtc_data: list | None = None):
+        """Seed an initial diagnostic message — optionally with vehicle + DTC context."""
+        self.vehicle_info = vehicle_info or {}
+        self.dtc_data = dtc_data or []
 
         fault_text = ""
-        for mod in dtc_data:
+        for mod in self.dtc_data:
             for dtc in mod.get("dtcs", []):
                 desc = dtc.get("description", "") or "No description"
                 status = dtc.get("status_text", "") or dtc.get("status", "") or "Unknown"
                 fault_text += f"  [{mod['module_abbrev']}] {dtc['code']} — {desc}  [{status}]\n"
 
         vehicle_text = ""
-        if vehicle_info:
+        if self.vehicle_info:
             vehicle_text = "\n".join([
-                f"  Year: {vehicle_info.get('year','?')}",
-                f"  Make: {vehicle_info.get('make','?')}",
-                f"  Model: {vehicle_info.get('model','?')}",
-                f"  Engine: {vehicle_info.get('engine','?')} ({vehicle_info.get('displacement_l','?')}L {vehicle_info.get('cylinders','?')}cyl)",
-                f"  Transmission: {vehicle_info.get('transmission','?')}",
-                f"  Body: {vehicle_info.get('body_class','?')}",
-                f"  Built: {vehicle_info.get('built_at','?')}",
-                f"  VIN: {vehicle_info.get('vin','?')}",
+                f"  Year: {self.vehicle_info.get('year','?')}",
+                f"  Make: {self.vehicle_info.get('make','?')}",
+                f"  Model: {self.vehicle_info.get('model','?')}",
+                f"  Engine: {self.vehicle_info.get('engine','?')} "
+                f"({self.vehicle_info.get('displacement_l','?')}L "
+                f"{self.vehicle_info.get('cylinders','?')}cyl)",
+                f"  Transmission: {self.vehicle_info.get('transmission','?')}",
+                f"  Body: {self.vehicle_info.get('body_class','?')}",
+                f"  Built: {self.vehicle_info.get('built_at','?')}",
+                f"  VIN: {self.vehicle_info.get('vin','?')}",
             ])
 
-        self.messages = [{
-            "role": "user",
-            "content": f"""I need you to diagnose my vehicle. Here's what I know:
-
-VEHICLE INFO:
-{vehicle_text or 'No vehicle info available yet'}
-
-FAULT CODES:
-{fault_text or 'No fault codes read yet'}
-
-Please start by giving me your initial assessment. What do you see? What should I check first?"""
-        }]
+        opening = (
+            "Hi — I'm starting an AI Mechanic session inside Fuse OBD. "
+            "I can help with the vehicle, with the OBD adapter, or with the app itself.\n\n"
+        )
+        if vehicle_text or fault_text:
+            opening += (
+                "VEHICLE INFO:\n"
+                f"{vehicle_text or '  (no vehicle info yet)'}\n\n"
+                "FAULT CODES:\n"
+                f"{fault_text or '  (no fault codes read yet)'}\n\n"
+                "Please give me your initial assessment."
+            )
+        else:
+            opening += (
+                "No vehicle is connected yet. Call get_app_info() and list_adapters() "
+                "first so we know what we're working with, then introduce yourself briefly "
+                "and ask the user what they want to do (diagnose the car, find an adapter, "
+                "or debug the app)."
+            )
+        self.messages = [{"role": "user", "content": opening}]
 
     def send_message(self, user_text: str) -> str:
-        """Send a message to the AI mechanic and get the response. Handles tool use loop."""
         self.messages.append({"role": "user", "content": user_text})
-
         try:
             return self._run_tool_loop()
         except anthropic.RateLimitError:
             return "The AI service is rate limited right now. Give it a minute and try again."
         except anthropic.APIStatusError as e:
             return f"AI service error: {e.message}"
+        except RuntimeError as e:
+            return str(e)
         except Exception as e:
-            return f"AI chat error: {str(e)}"
+            issues_log.log_exception("AI chat error", e, kind=issues_log.KIND_APP,
+                                     source="ai_chat")
+            return f"AI chat error: {e}"
 
-    def _run_tool_loop(self, max_turns: int = 5) -> str:
-        """Run the Claude tool use loop — Claude can call tools multiple times before responding."""
+    def kick_off(self) -> str:
+        """Run the initial seeded user message and return the mechanic's reply."""
+        try:
+            return self._run_tool_loop()
+        except anthropic.RateLimitError:
+            return "The AI service is rate limited right now. Give it a minute and try again."
+        except anthropic.APIStatusError as e:
+            return f"AI service error: {e.message}"
+        except RuntimeError as e:
+            return str(e)
+        except Exception as e:
+            issues_log.log_exception("AI chat error", e, kind=issues_log.KIND_APP,
+                                     source="ai_chat")
+            return f"AI chat error: {e}"
+
+    # ── tool loop ──
+
+    def _execute_tool(self, name: str, params: dict) -> str:
+        if self._on_tool_call:
+            try:
+                self._on_tool_call(name, params)
+            except Exception:
+                pass
+        if name == "search_web":
+            return _search_web(params.get("query", ""))
+        if name == "fetch_page":
+            return _fetch_text(params.get("url", ""))
+        if name == "list_adapters":
+            return _list_adapters()
+        if name == "list_windows_serial_devices":
+            return _list_windows_serial_devices()
+        if name == "list_windows_usb_devices":
+            return _list_windows_usb_devices()
+        if name == "scan_local_network_obd":
+            return _scan_local_network_obd()
+        if name == "read_app_debug_log":
+            return _read_app_debug_log()
+        if name == "get_app_info":
+            return _get_app_info(self._state_provider)
+        if name == "log_issue":
+            return _log_issue(params)
+        return f"Unknown tool: {name}"
+
+    def _run_tool_loop(self, max_turns: int = 8) -> str:
         current_messages = list(self.messages)
+        text_blocks: list[str] = []
 
         for _ in range(max_turns):
             response = self._get_client().messages.create(
@@ -218,25 +546,20 @@ Please start by giving me your initial assessment. What do you see? What should 
                 messages=current_messages,
             )
 
-            # Check for tool use
             tool_uses = []
             text_blocks = []
-
             for block in response.content:
                 if block.type == "tool_use":
                     tool_uses.append(block)
                 elif block.type == "text":
                     text_blocks.append(block.text)
 
-            # If Claude provided text and no tool use, we're done
             if text_blocks and not tool_uses:
                 final_text = "\n".join(text_blocks)
                 self.messages.append({"role": "assistant", "content": final_text})
                 return final_text
 
-            # If Claude wants to use tools
             if tool_uses:
-                # Build assistant content with tool use blocks
                 assistant_content = []
                 for b in response.content:
                     if b.type == "text":
@@ -248,31 +571,24 @@ Please start by giving me your initial assessment. What do you see? What should 
                             "name": b.name,
                             "input": b.input,
                         })
-
                 current_messages.append({"role": "assistant", "content": assistant_content})
 
-                # Execute tools and build results
                 tool_results = []
                 for tu in tool_uses:
-                    if tu.name == "search_web":
-                        result_text = _search_web(tu.input.get("query", ""))
-                    elif tu.name == "fetch_page":
-                        result_text = _fetch_text(tu.input.get("url", ""))
-                    else:
-                        result_text = f"Unknown tool: {tu.name}"
-
+                    result_text = self._execute_tool(tu.name, dict(tu.input))
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": tu.id,
                         "content": result_text[:6000],
                     })
-
                 current_messages.append({"role": "user", "content": tool_results})
                 continue
 
-            # No tool use and no text = unexpected; return whatever we have
             if text_blocks:
                 return "\n".join(text_blocks)
             return "I'm not sure how to respond to that. Could you rephrase?"
 
-        return "I've done several rounds of research but I'm going in circles. Let me give you what I have so far:\n\n" + "\n".join(text_blocks) if text_blocks else "I couldn't reach a conclusion. Let me start fresh — what would you like to know?"
+        if text_blocks:
+            return ("I've done several rounds of research but I'm going in circles. "
+                    "Here's what I have so far:\n\n" + "\n".join(text_blocks))
+        return "I couldn't reach a conclusion. Let me start fresh — what would you like to know?"

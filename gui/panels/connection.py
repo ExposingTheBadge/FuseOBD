@@ -11,12 +11,18 @@ from PyQt6.QtWidgets import (
 
 from core.j2534 import J2534, J2534Device, enumerate_devices
 from gui.qt_helpers import BasePanel, run_thread, warn, info, error, confirm
+from modules import issues_log
 
 
 def _log(msg: str) -> None:
     try:
         with open(tempfile.gettempdir() + "/fuse_debug.log", "a") as f:
             f.write(msg + "\n")
+    except Exception:
+        pass
+    # Mirror into the AI-readable debug log so the AI Mechanic can introspect.
+    try:
+        issues_log.log_app_event(msg)
     except Exception:
         pass
 
@@ -316,6 +322,32 @@ class ConnectionPanel(BasePanel):
                 _log("Connect success - UI updated")
             except Exception as e:
                 _log(f"CONNECT ERROR: {e}\n{traceback.format_exc()}")
+                try:
+                    issues_log.add_issue(
+                        title=f"Adapter connect failed: {device.name}",
+                        kind=issues_log.KIND_CONNECTION,
+                        severity=issues_log.SEVERITY_MED,
+                        summary_simple=(
+                            f"Fuse OBD couldn't open the OBD adapter \"{device.name}\".\n\n"
+                            f"Short reason: {e}\n\n"
+                            "Try the AI Mechanic — it can check Windows Device Manager, "
+                            "look at other adapters, and walk you through a fix."
+                        ),
+                        summary_technical=(
+                            f"Device: {device.name}\n"
+                            f"Vendor: {device.vendor}\n"
+                            f"Port: {device.port}  Host: {device.host}\n"
+                            f"Serial: {device.is_serial}  WiFi: {device.is_wifi}\n"
+                            f"DLL: {device.dll_path}\n\n"
+                            f"Exception: {e!r}\n\n"
+                            f"{traceback.format_exc()}"
+                        ),
+                        source="connection_panel._connect",
+                        context={"adapter": device.name, "port": device.port,
+                                 "host": device.host},
+                    )
+                except Exception:
+                    pass
 
                 def on_failed():
                     self.connect_btn.setEnabled(True)

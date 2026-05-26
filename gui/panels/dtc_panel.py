@@ -3,7 +3,7 @@ import webbrowser
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QBrush, QColor, QFont
 from PyQt6.QtWidgets import (
-    QHBoxLayout, QLabel, QLineEdit, QProgressBar, QPushButton, QSplitter,
+    QHBoxLayout, QLabel, QProgressBar, QPushButton, QSplitter,
     QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -20,7 +20,6 @@ class DTCPanel(BasePanel):
         self.get_vehicle = get_vehicle
         self.all_dtcs: list[ModuleDTCs] = []
         self.vehicle_info: dict = {}
-        self.chat = None
         self._vehicle_image_url: str | None = None
         self._build_ui()
 
@@ -39,9 +38,12 @@ class DTCPanel(BasePanel):
         self.clear_btn.clicked.connect(self._clear_all)
         tb.addWidget(self.clear_btn)
 
-        self.ai_btn = QPushButton("AI Mechanic")
-        self.ai_btn.clicked.connect(self._start_ai_session)
-        self.ai_btn.setEnabled(False)
+        self.ai_btn = QPushButton("AI Mechanic — diagnose these")
+        self.ai_btn.setToolTip(
+            "Open the AI Mechanic window with the current vehicle and "
+            "fault list preloaded for diagnosis."
+        )
+        self.ai_btn.clicked.connect(self._open_ai_with_dtcs)
         tb.addWidget(self.ai_btn)
 
         self.progress = QProgressBar()
@@ -69,30 +71,16 @@ class DTCPanel(BasePanel):
         self.tree.setAlternatingRowColors(True)
         for col, w in enumerate([60, 70, 220, 65, 180]):
             self.tree.setColumnWidth(col, w)
-        left_v.addWidget(self.tree, stretch=2)
+        left_v.addWidget(self.tree, stretch=1)
 
-        chat_header = QHBoxLayout()
-        chat_header.addWidget(self._bold("AI Mechanic Chat"))
-        chat_header.addStretch(1)
-        self.chat_status = QLabel("")
-        chat_header.addWidget(self.chat_status)
-        left_v.addLayout(chat_header)
-
-        self.chat_text = QTextEdit()
-        self.chat_text.setReadOnly(True)
-        self.chat_text.setStyleSheet("background-color: #1a1a1a; color: #e0e0e0; border: 1px solid #444;")
-        left_v.addWidget(self.chat_text, stretch=1)
-
-        input_row = QHBoxLayout()
-        self.chat_input = QLineEdit()
-        self.chat_input.returnPressed.connect(self._send_chat)
-        self.chat_input.setEnabled(False)
-        input_row.addWidget(self.chat_input)
-        self.send_btn = QPushButton("Send")
-        self.send_btn.setFixedWidth(80)
-        self.send_btn.clicked.connect(self._send_chat)
-        input_row.addWidget(self.send_btn)
-        left_v.addLayout(input_row)
+        hint = QLabel(
+            "AI Mechanic is now its own window — click the big orange "
+            "<b>AI Mechanic</b> button above the tabs (or here on the toolbar) "
+            "to open it. It works with or without a vehicle connected."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#888; padding:6px;")
+        left_v.addWidget(hint)
 
         main_split.addWidget(left)
 
@@ -148,7 +136,7 @@ class DTCPanel(BasePanel):
 
         self.read_btn.setEnabled(False)
         self.clear_btn.setEnabled(False)
-        self.ai_btn.setEnabled(False)
+        # AI button stays enabled — the AI window is always usable.
         self.tree.clear()
         self.progress.setValue(0)
         self.all_dtcs = []
@@ -332,86 +320,27 @@ class DTCPanel(BasePanel):
         if self._vehicle_image_url:
             webbrowser.open(self._vehicle_image_url)
 
-    # ───────────────────────── AI chat ─────────────────────────
+    # ───────────────────────── AI Mechanic shortcut ─────────────────────────
 
-    def _start_ai_session(self):
-        self.ai_btn.setEnabled(False)
-        self.chat_input.setEnabled(True)
-        self.chat_text.clear()
-        self._append_chat("system", "Starting AI Mechanic session...")
-        self.chat_status.setText("Connecting...")
+    def _open_ai_with_dtcs(self):
+        """Send the freshly-read DTC list to the global AI Mechanic window."""
+        dtc_data = []
+        for mod in self.all_dtcs:
+            mod_dtcs = []
+            for d in mod.dtcs:
+                mod_dtcs.append({
+                    "code": d.code,
+                    "description": lookup_dtc(d.code),
+                    "status": "ACTIVE" if d.is_active else ("PENDING" if d.is_pending else "STORED"),
+                    "status_text": d.status_text,
+                })
+            dtc_data.append({
+                "module_name": mod.module_name,
+                "module_abbrev": mod.module_abbrev,
+                "dtcs": mod_dtcs,
+            })
 
-        def init_chat():
-            try:
-                from modules.ai_chat import MechanicChat
-                dtc_data = []
-                for mod in self.all_dtcs:
-                    mod_dtcs = []
-                    for d in mod.dtcs:
-                        mod_dtcs.append({
-                            "code": d.code,
-                            "description": lookup_dtc(d.code),
-                            "status": "ACTIVE" if d.is_active else ("PENDING" if d.is_pending else "STORED"),
-                            "status_text": d.status_text,
-                        })
-                    dtc_data.append({
-                        "module_name": mod.module_name,
-                        "module_abbrev": mod.module_abbrev,
-                        "dtcs": mod_dtcs,
-                    })
-                self.chat = MechanicChat()
-                self.chat.start_session(self.vehicle_info, dtc_data)
-                if dtc_data:
-                    response = self.chat.send_message("Start the diagnosis. What do you see?")
-                else:
-                    response = self.chat.send_message(
-                        "Introduce yourself briefly and ask what I'd like help with today."
-                    )
-                self.after(0, lambda: self._append_chat("mechanic", response))
-                self.after(0, lambda: self.chat_status.setText("Connected — ask anything"))
-                self.after(0, lambda: self.ai_btn.setEnabled(True))
-            except Exception as e:
-                self.after(0, lambda: self._append_chat("error", f"Failed to start AI session: {e}"))
-                self.after(0, lambda: self.chat_status.setText("Error"))
-                self.after(0, lambda: self.ai_btn.setEnabled(True))
-
-        run_thread(init_chat)
-
-    def _send_chat(self):
-        if not self.chat:
-            return
-        user_text = self.chat_input.text().strip()
-        if not user_text:
-            return
-        self.chat_input.clear()
-        self.chat_input.setEnabled(False)
-        self._append_chat("user", user_text)
-        self.chat_status.setText("Thinking...")
-
-        def thread():
-            try:
-                response = self.chat.send_message(user_text)
-                self.after(0, lambda: self._append_chat("mechanic", response))
-                self.after(0, lambda: self.chat_status.setText("Connected — ask anything"))
-            except Exception as e:
-                self.after(0, lambda: self._append_chat("error", f"Error: {e}"))
-                self.after(0, lambda: self.chat_status.setText("Error"))
-            finally:
-                self.after(0, lambda: self.chat_input.setEnabled(True))
-                self.after(0, lambda: self.chat_input.setFocus())
-
-        run_thread(thread)
-
-    def _append_chat(self, role: str, text: str):
-        from html import escape
-        if role == "mechanic":
-            prefix = '<span style="color:#ff8800;font-weight:bold;">🔧 Mechanic:</span>'
-        elif role == "user":
-            prefix = '<span style="color:#44aaff;font-weight:bold;">👤 You:</span>'
-        elif role == "error":
-            prefix = '<span style="color:#ff4444;font-weight:bold;">⚠</span>'
-        else:
-            prefix = '<span style="color:#888;font-style:italic;"></span>'
-        body = escape(text).replace("\n", "<br>")
-        self.chat_text.append(f"<br>{prefix}<br>{body}")
-        self.chat_text.verticalScrollBar().setValue(self.chat_text.verticalScrollBar().maximum())
+        # Walk up to the main window and ask it to open the AI window.
+        w = self.window()
+        if w is not None and hasattr(w, "open_ai_mechanic"):
+            w.open_ai_mechanic(vehicle_info=self.vehicle_info, dtc_data=dtc_data)
