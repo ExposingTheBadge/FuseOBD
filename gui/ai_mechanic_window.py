@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import (
 
 from modules import issues_log
 from modules.issues_log import Issue
-from modules.ai_chat import MechanicChat
+from modules.ai_chat import MechanicChat, diagnose_config
 
 
 # ── colours ─────────────────────────────────────────────────────────────────
@@ -403,8 +403,11 @@ class AIMechanicWindow(QMainWindow):
                 "(or MOD_ANTHROPIC_API_KEY) in Windows system environment, "
                 "then restart Fuse OBD.\n\n"
                 "Optional vars: MOD_ANTHROPIC_BASE_URL, MOD_ANTHROPIC_MODEL, "
-                "MOD_ANTHROPIC_DEFAULT_OPUS_MODEL."
+                "MOD_ANTHROPIC_DEFAULT_OPUS_MODEL.\n\n"
+                "Click the 'Show config diagnostic' button below to see "
+                "exactly which variables Fuse OBD can read."
             )
+            self._show_config_diagnostic_button()
             self.status_label.setText("Not configured")
             return
 
@@ -514,6 +517,28 @@ class AIMechanicWindow(QMainWindow):
             w = item.widget()
             if w is not None:
                 w.deleteLater()
+
+    def _show_config_diagnostic_button(self):
+        """Insert a 'Show config diagnostic' button into the chat area."""
+        row = QFrame()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(10, 4, 10, 8)
+        h.addStretch(1)
+        btn = QPushButton("Show config diagnostic")
+        btn.setStyleSheet(
+            "QPushButton { background:#2c4a6e; color:white; border:none; "
+            "padding:6px 14px; border-radius:4px; }"
+            "QPushButton:hover { background:#3a5d87; }"
+        )
+        btn.clicked.connect(self._open_config_diagnostic)
+        h.addWidget(btn)
+        h.addStretch(1)
+        index = self.bubbles_layout.count() - 1
+        self.bubbles_layout.insertWidget(index, row)
+
+    def _open_config_diagnostic(self):
+        dlg = _ConfigDiagnosticDialog(diagnose_config(), self)
+        dlg.exec()
 
     # ── issues pane ──
 
@@ -661,3 +686,80 @@ class _IssueDetailDialog(QDialog):
         ) == QMessageBox.StandardButton.Yes:
             issues_log.remove_issue(issue.id)
             self.accept()
+
+
+# ── config diagnostic dialog ────────────────────────────────────────────────
+
+
+class _ConfigDiagnosticDialog(QDialog):
+    """Show exactly which env vars and registry values Fuse OBD can see."""
+
+    def __init__(self, diag: dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("AI Mechanic — Configuration Diagnostic")
+        self.resize(720, 520)
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(12, 12, 12, 10)
+        v.setSpacing(8)
+
+        title = QLabel("AI Mechanic Configuration Diagnostic")
+        f = QFont(); f.setPointSize(12); f.setBold(True)
+        title.setFont(f)
+        title.setStyleSheet("color:#ff8800;")
+        v.addWidget(title)
+
+        intro = QLabel(
+            "For every setting, this lists each env var Fuse OBD checks, "
+            "the value it sees in the process environment, and the value "
+            "(if any) in the Windows registry. Tokens are partially redacted "
+            "so the first/last few characters are visible for verification."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color:#aaa;")
+        v.addWidget(intro)
+
+        body = QTextBrowser()
+        body.setOpenExternalLinks(False)
+        body.setStyleSheet(
+            "QTextBrowser { background:#101010; color:#d8d8d8; border:1px solid #444; "
+            "font-family: Consolas, monospace; font-size: 9.5pt; padding:8px; }"
+        )
+
+        lines: list[str] = []
+        for setting, info in diag.items():
+            lines.append("=" * 70)
+            lines.append(f"  {setting}    resolved → {info['resolved']}")
+            lines.append("=" * 70)
+            for row in info["candidates"]:
+                lines.append(f"  {row['name']}")
+                lines.append(f"      process env: {row['in_process_env']}")
+                lines.append(f"      registry:    {row['in_registry']}")
+            lines.append("")
+
+        # Add a hint about HKCU shadowing HKLM
+        lines.append("-" * 70)
+        lines.append("Notes:")
+        lines.append("  • Process-env value 'unset' or empty means Windows merged a")
+        lines.append("    user-level (HKCU) blank over the system-level value.")
+        lines.append("  • Fuse OBD now falls back to the Windows registry when the")
+        lines.append("    process env is empty, so the system-level value still wins.")
+        lines.append("  • If everything above is '(unset)', set MOD_ANTHROPIC_AUTH_TOKEN")
+        lines.append("    in System Properties → Environment Variables → System variables.")
+
+        body.setPlainText("\n".join(lines))
+        v.addWidget(body, stretch=1)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        copy_btn = QPushButton("Copy to Clipboard")
+        copy_btn.clicked.connect(lambda: self._copy(body.toPlainText()))
+        row.addWidget(copy_btn)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        row.addWidget(close_btn)
+        v.addLayout(row)
+
+    def _copy(self, text: str):
+        from PyQt6.QtWidgets import QApplication as _QApplication
+        _QApplication.clipboard().setText(text)
