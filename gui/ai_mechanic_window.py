@@ -202,6 +202,7 @@ class AIMechanicWindow(QMainWindow):
 
     def __init__(self, parent_window: Optional[QWidget] = None,
                  state_provider: Optional[Callable[[], dict]] = None,
+                 tool_bridge: Optional[object] = None,
                  icon: Optional[QIcon] = None):
         super().__init__(None)  # detached top-level window
         self.setWindowTitle("AI Mechanic — Fuse OBD")
@@ -215,6 +216,7 @@ class AIMechanicWindow(QMainWindow):
 
         self._parent_window = parent_window
         self._state_provider = state_provider
+        self._tool_bridge = tool_bridge
         self.chat: Optional[MechanicChat] = None
         self._initialised = False
 
@@ -450,7 +452,8 @@ class AIMechanicWindow(QMainWindow):
         self.input.setEnabled(False)
 
         self.chat = MechanicChat(state_provider=self._state_provider,
-                                 on_tool_call=self._on_tool_call)
+                                 on_tool_call=self._on_tool_call,
+                                 tool_bridge=self._tool_bridge)
         try:
             self.chat.start_session(vehicle_info or {}, dtc_data or [])
         except Exception as e:

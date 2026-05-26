@@ -455,7 +455,9 @@ def _log_issue(args: dict) -> str:
 # ── Tool definitions ───────────────────────────────────────────────────────
 
 
-TOOLS = [
+from modules.ai_tools import READ_ONLY_TOOLS as _DIAG_TOOLS  # noqa: E402
+
+TOOLS = _DIAG_TOOLS + [
     {
         "name": "search_web",
         "description": "Search the internet for automotive diagnostic information, TSBs, forum discussions, repair guides, and common fixes.",
@@ -531,12 +533,15 @@ TOOLS = [
 class MechanicChat:
     """Interactive AI mechanic with web search, app self-diagnostics and tool use."""
 
-    def __init__(self, state_provider=None, on_tool_call=None):
+    def __init__(self, state_provider=None, on_tool_call=None, tool_bridge=None):
         """
         state_provider: optional callable returning a dict describing the
             host app state (whether a vehicle is connected, current VIN,
             adapter info, etc). Surfaced to the model via get_app_info().
         on_tool_call: optional callable(tool_name, summary) for UI status.
+        tool_bridge: optional AIToolBridge giving the AI read-only access
+            to the vehicle (DTCs, VIN, scan, live data, As-Built, PATS info)
+            and the UI panels (so reads auto-populate the visible fields).
         """
         self.messages: list[dict] = []
         self.vehicle_info: dict = {}
@@ -544,6 +549,7 @@ class MechanicChat:
         self._client = None
         self._state_provider = state_provider
         self._on_tool_call = on_tool_call
+        self._tool_bridge = tool_bridge
 
     # ── credentials / client ──
 
@@ -710,6 +716,20 @@ class MechanicChat:
                 result = _get_app_info(self._state_provider)
             elif name == "log_issue":
                 result = _log_issue(params)
+            elif self._tool_bridge is not None and hasattr(self._tool_bridge, name):
+                bridge_method = getattr(self._tool_bridge, name)
+                try:
+                    bridge_result = bridge_method(**params)
+                except TypeError:
+                    bridge_result = bridge_method()
+                if isinstance(bridge_result, str):
+                    result = bridge_result
+                else:
+                    import json as _json
+                    try:
+                        result = _json.dumps(bridge_result, default=str, indent=2)
+                    except Exception:
+                        result = str(bridge_result)
             else:
                 result = f"Unknown tool: {name}"
         except Exception as e:

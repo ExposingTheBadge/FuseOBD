@@ -20,6 +20,7 @@ from gui.panels.pats_panel import PATSPanel
 from gui.panels.asbuilt_panel import AsBuiltPanel
 from gui.panels.monitor_panel import MonitorPanel
 from gui.panels.security_panel import SecurityPanel
+from gui.panels.bus_monitor_panel import BusMonitorPanel
 from gui.theme import apply_theme
 from gui.qt_helpers import warn, confirm, info
 from gui.ai_mechanic_window import AIMechanicWindow
@@ -190,6 +191,7 @@ class FuseMainWindow(QMainWindow):
         self.asbuilt_panel = AsBuiltPanel(self.notebook, self._get_vehicle)
         self.monitor_panel = MonitorPanel(self.notebook, self._get_vehicle)
         self.security_panel = SecurityPanel(self.notebook, self._get_vehicle)
+        self.bus_monitor_panel = BusMonitorPanel(self.notebook)
 
         self.notebook.addTab(self.scanner_panel, "  Scanner  ")
         self.notebook.addTab(self.dtc_panel, "  Faults  ")
@@ -197,6 +199,7 @@ class FuseMainWindow(QMainWindow):
         self.notebook.addTab(self.asbuilt_panel, "  Factory Settings  ")
         self.notebook.addTab(self.monitor_panel, "  Live Data  ")
         self.notebook.addTab(self.security_panel, "  Security Access  ")
+        self.notebook.addTab(self.bus_monitor_panel, "  Bus Monitor  ")
 
         layout.addWidget(self.notebook, stretch=1)
         self.setCentralWidget(central)
@@ -294,6 +297,45 @@ class FuseMainWindow(QMainWindow):
             pass
         return state
 
+    def _build_ai_bridge(self):
+        """Build the AIToolBridge that gives the AI Mechanic read-only access.
+
+        Scope confirmed by the user:
+          - Read-only writes (no clear, no program, no As-Built write)
+          - Auto-connect ONLY after explicit user confirm
+          - SecurityAccess any-level allowed (reads can need it)
+          - Bruteforce remains blocked
+        """
+        from modules.ai_tools import AIToolBridge
+
+        def _confirm(title: str, message: str) -> bool:
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setWindowTitle(title)
+            box.setText(message)
+            box.setStandardButtons(
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            box.setDefaultButton(QMessageBox.StandardButton.No)
+            return box.exec() == QMessageBox.StandardButton.Yes
+
+        def _run_on_ui(fn):
+            # Cross-thread invocation onto the GUI thread.
+            QTimer.singleShot(0, fn)
+
+        return AIToolBridge(
+            get_vehicle=lambda: self.vehicle,
+            get_j2534=lambda: getattr(self.conn_panel, "j2534", None),
+            connection_panel=self.conn_panel,
+            dtc_panel=self.dtc_panel,
+            scanner_panel=self.scanner_panel,
+            monitor_panel=self.monitor_panel,
+            asbuilt_panel=self.asbuilt_panel,
+            pats_panel=self.pats_panel,
+            confirm=_confirm,
+            run_on_ui=_run_on_ui,
+        )
+
     def open_ai_mechanic(self, vehicle_info: Optional[dict] = None,
                          dtc_data: Optional[list] = None):
         """Public entry-point so panels can open the window with context."""
@@ -301,6 +343,7 @@ class FuseMainWindow(QMainWindow):
             self._ai_window = AIMechanicWindow(
                 parent_window=self,
                 state_provider=self._ai_state_provider,
+                tool_bridge=self._build_ai_bridge(),
                 icon=self.windowIcon(),
             )
         self._ai_window.show_with_context(vehicle_info=vehicle_info, dtc_data=dtc_data)

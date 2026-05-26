@@ -299,9 +299,38 @@ def _announce_session(f) -> None:
     f.write(banner)
 
 
+_log_listeners: list = []
+
+
+def subscribe_log(callback) -> None:
+    """Register a callback that fires for every log line.
+
+    Signature: callback(tag: str, message: str, ts: float).
+    Runs in the writer thread — subscribers must marshal to the UI
+    thread themselves (e.g. via a pyqtSignal). Exceptions inside the
+    callback are swallowed so a misbehaving listener can't crash logging.
+    """
+    if callback not in _log_listeners:
+        _log_listeners.append(callback)
+
+
+def unsubscribe_log(callback) -> None:
+    if callback in _log_listeners:
+        _log_listeners.remove(callback)
+
+
+def _broadcast_log(tag: str, message: str, ts: float) -> None:
+    for cb in list(_log_listeners):
+        try:
+            cb(tag, message, ts)
+        except Exception:
+            pass
+
+
 def _write_log_line(tag: str, message: str) -> None:
     global _log_warned_once
     path = app_debug_log_path()
+    ts = time.time()
     try:
         _rotate_if_needed(path)
         with _file_lock:
@@ -312,6 +341,9 @@ def _write_log_line(tag: str, message: str) -> None:
         if not _log_warned_once:
             _log_warned_once = True
             sys.stderr.write(f"[issues_log] cannot write {path}: {e}\n")
+    # Broadcast AFTER the disk write so a slow subscriber can't gum up
+    # logging or hold the file lock.
+    _broadcast_log(tag, message, ts)
 
 
 def log_app_event(message: str, *, exc: Optional[BaseException] = None) -> None:
