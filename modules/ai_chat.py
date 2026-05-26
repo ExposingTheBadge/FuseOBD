@@ -7,17 +7,19 @@ The mechanic can:
   • read Fuse OBD's own debug log to self-diagnose problems with the app
   • record findings into a persistent issues log that the UI displays
 
-All AI credentials are read from MOD_-prefixed environment variables so the
-AI Mechanic is configured independently from any other Anthropic clients in
-the application:
+## Credential resolution (in priority order)
 
-    MOD_ANTHROPIC_AUTH_TOKEN          – primary API key
-    MOD_ANTHROPIC_API_KEY             – fallback
-    MOD_ANTHROPIC_BASE_URL            – optional custom base URL
-    MOD_ANTHROPIC_MODEL               – override model id
-    MOD_ANTHROPIC_DEFAULT_OPUS_MODEL  – default model (fallback)
+1. **Local override (developer mode)** — if `MOD_ANTHROPIC_AUTH_TOKEN`
+   (or any alias) is set in the process environment / Windows registry,
+   the client talks directly to that upstream with that key. This is
+   what we use on the dev workstation.
+2. **Hosted Fuse OBD proxy (default for end users)** — if no local
+   token is present, the client connects to `HOSTED_PROXY_BASE_URL`
+   (`http://150.195.114.185:8080/api/ai`). The Fuse-Web Node server
+   adds the real upstream auth header and forwards to DeepSeek. End
+   users need ZERO configuration.
 
-Short aliases (MOD_AUTH_TOKEN / MOD_BASE_URL / MOD_MODEL) are also accepted.
+End users never see or possess the real API key.
 """
 from __future__ import annotations
 
@@ -92,31 +94,56 @@ def _env_first(*names: str, default: str = "") -> str:
     return default
 
 
-AUTH_TOKEN = _env_first(
+LOCAL_AUTH_TOKEN = _env_first(
     "MOD_ANTHROPIC_AUTH_TOKEN",
     "MOD_ANTHROPIC_API_KEY",
     "MOD_AUTH_TOKEN",
     "MOD_API_KEY",
 )
-BASE_URL = _env_first(
+LOCAL_BASE_URL = _env_first(
     "MOD_ANTHROPIC_BASE_URL",
     "MOD_BASE_URL",
 )
-MODEL = _env_first(
+LOCAL_MODEL = _env_first(
     "MOD_ANTHROPIC_MODEL",
     "MOD_ANTHROPIC_DEFAULT_OPUS_MODEL",
     "MOD_MODEL",
     "MOD_DEFAULT_OPUS_MODEL",
-    default="claude-opus-4-7",
+    default="",
 )
+
+# ── Hosted Fuse OBD proxy (the default for end users) ─────────────────
+# Points at the Node server in D:\APP\Fuse-Web — `server.js` on the
+# same box as fuse-obd.com. Anthropic-compatible: the client uses
+# `base_url = HOSTED_PROXY_BASE_URL` and the SDK appends /v1/messages.
+HOSTED_PROXY_BASE_URL = os.environ.get(
+    "FUSE_AI_ENDPOINT_OVERRIDE",
+    "http://150.195.114.185:8080/api/ai",
+)
+HOSTED_PROXY_MODEL = "deepseek-v4-pro"  # server overrides if MOD_ANTHROPIC_MODEL set
+
+USE_HOSTED_PROXY = not LOCAL_AUTH_TOKEN
+
+# Kept for backward compatibility with code that imports these directly.
+AUTH_TOKEN = "hosted-proxy" if USE_HOSTED_PROXY else LOCAL_AUTH_TOKEN
+BASE_URL = HOSTED_PROXY_BASE_URL if USE_HOSTED_PROXY else LOCAL_BASE_URL
+MODEL = HOSTED_PROXY_MODEL if USE_HOSTED_PROXY else (LOCAL_MODEL or "claude-opus-4-7")
+
+
+def using_hosted_proxy() -> bool:
+    """True if the client is going through the Fuse OBD hosted proxy."""
+    return USE_HOSTED_PROXY
+
+
+def hosted_proxy_url() -> str:
+    return HOSTED_PROXY_BASE_URL
 
 
 def diagnose_config() -> dict:
-    """Return a diagnostic snapshot of where each setting came from.
+    """Return a diagnostic snapshot of how the AI Mechanic is configured.
 
-    The AI Mechanic window calls this when the user hits the
-    "Show diagnostic" button on the not-configured error so the user
-    can see exactly what FuseOBD is seeing for each variable.
+    Shows whether the client is going through the hosted proxy or using
+    a local key override, and lists every env var the client checks.
     """
     var_groups = {
         "AUTH_TOKEN": ["MOD_ANTHROPIC_AUTH_TOKEN", "MOD_ANTHROPIC_API_KEY",
@@ -125,7 +152,7 @@ def diagnose_config() -> dict:
         "MODEL":      ["MOD_ANTHROPIC_MODEL", "MOD_ANTHROPIC_DEFAULT_OPUS_MODEL",
                        "MOD_MODEL", "MOD_DEFAULT_OPUS_MODEL"],
     }
-    result: dict = {}
+    candidates: dict = {}
     for setting, names in var_groups.items():
         rows = []
         for n in names:
@@ -136,11 +163,17 @@ def diagnose_config() -> dict:
                 "in_process_env": _redact(proc_v),
                 "in_registry":    _redact(reg_v),
             })
-        result[setting] = {
-            "resolved": _redact(globals().get(setting, "")),
-            "candidates": rows,
-        }
-    return result
+        candidates[setting] = rows
+    return {
+        "mode": "hosted-proxy" if USE_HOSTED_PROXY else "local-override",
+        "hosted_proxy_url": HOSTED_PROXY_BASE_URL,
+        "resolved": {
+            "AUTH_TOKEN": _redact(AUTH_TOKEN),
+            "BASE_URL":   BASE_URL,
+            "MODEL":      MODEL,
+        },
+        "candidates": candidates,
+    }
 
 
 def _redact(value) -> str:
@@ -516,18 +549,33 @@ class MechanicChat:
 
     @staticmethod
     def is_configured() -> bool:
-        return bool(AUTH_TOKEN)
+        # Hosted proxy is always reachable in principle, so the client is
+        # always "configured". If the hosted proxy is offline we surface
+        # that as a connection error from the first send_message call.
+        return True
 
     def _get_client(self):
         if self._client is None:
-            if not AUTH_TOKEN:
-                raise RuntimeError(
-                    "No AI auth token configured. Set MOD_ANTHROPIC_AUTH_TOKEN "
-                    "(or MOD_ANTHROPIC_API_KEY) in Windows system environment variables."
-                )
-            kwargs = {"api_key": AUTH_TOKEN, "timeout": 120.0}
-            if BASE_URL:
-                kwargs["base_url"] = BASE_URL
+            if USE_HOSTED_PROXY:
+                from modules.machine_id import get_machine_id
+                try:
+                    from version import VERSION
+                except Exception:
+                    VERSION = "?"
+                kwargs = {
+                    "api_key": "hosted-proxy",  # placeholder; proxy injects real auth
+                    "base_url": HOSTED_PROXY_BASE_URL,
+                    "timeout": 120.0,
+                    "default_headers": {
+                        "x-fuse-client": f"FuseOBD/{VERSION}",
+                        "x-fuse-machine-id": get_machine_id(),
+                        "x-fuse-os": f"{platform.system()}-{platform.release()}",
+                    },
+                }
+            else:
+                kwargs = {"api_key": LOCAL_AUTH_TOKEN, "timeout": 120.0}
+                if LOCAL_BASE_URL:
+                    kwargs["base_url"] = LOCAL_BASE_URL
             self._client = anthropic.Anthropic(**kwargs)
         return self._client
 
