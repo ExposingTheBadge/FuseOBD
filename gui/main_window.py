@@ -7,7 +7,8 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QAction, QIcon
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QMessageBox, QTabWidget, QStatusBar,
-    QVBoxLayout, QWidget, QDialog, QLabel, QPushButton, QTextEdit, QFrame,
+    QVBoxLayout, QHBoxLayout, QWidget, QDialog, QLabel, QPushButton,
+    QTextEdit, QFrame,
 )
 
 from core.j2534 import J2534
@@ -21,8 +22,10 @@ from gui.panels.monitor_panel import MonitorPanel
 from gui.panels.security_panel import SecurityPanel
 from gui.theme import apply_theme
 from gui.qt_helpers import warn, confirm, info
+from gui.ai_mechanic_window import AIMechanicWindow
 from version import VERSION, VERSION_SHORT, APP_NAME, APP_DESC, BUILD
 from modules.updater import check_async, UpdateInfo
+from modules import issues_log
 
 
 AUTHOR = "Brent Gordon"
@@ -63,12 +66,40 @@ class FuseMainWindow(QMainWindow):
             self.setWindowIcon(QIcon(icon_path))
 
         self.vehicle: Optional[VehicleConnection] = None
+        self._ai_window: Optional[AIMechanicWindow] = None
+
+        self._install_exception_hook()
 
         self._build_menu()
         self._build_ui()
 
         # Silent auto-update check on startup
         QTimer.singleShot(1500, self._auto_check_updates)
+
+    def _install_exception_hook(self):
+        """Capture uncaught exceptions into the persistent issues log so the
+        AI Mechanic can read them later."""
+        prev = sys.excepthook
+
+        def hook(exc_type, exc, tb):
+            try:
+                exc.__traceback__ = tb
+                issues_log.log_exception(
+                    f"Unhandled {exc_type.__name__}",
+                    exc,
+                    kind=issues_log.KIND_APP,
+                    severity=issues_log.SEVERITY_HIGH,
+                    source="excepthook",
+                )
+            except Exception:
+                pass
+            if prev:
+                try:
+                    prev(exc_type, exc, tb)
+                except Exception:
+                    pass
+
+        sys.excepthook = hook
 
     # ── Menu ──
 
@@ -91,6 +122,16 @@ class FuseMainWindow(QMainWindow):
         act_light = QAction("Light Theme", self)
         act_light.triggered.connect(lambda: self._set_theme("light"))
         view_menu.addAction(act_light)
+
+        tools_menu = mb.addMenu("&Tools")
+        act_ai = QAction("AI Mechanic", self)
+        act_ai.setShortcut("Ctrl+M")
+        act_ai.triggered.connect(self._open_ai_mechanic)
+        tools_menu.addAction(act_ai)
+        tools_menu.addSeparator()
+        act_log = QAction("Show Issues Log Folder", self)
+        act_log.triggered.connect(self._open_log_folder)
+        tools_menu.addAction(act_log)
 
         help_menu = mb.addMenu("&Help")
         act_about = QAction("About Fuse OBD", self)
@@ -116,6 +157,31 @@ class FuseMainWindow(QMainWindow):
             self, on_connect=self._on_connect, on_disconnect=self._on_disconnect,
         )
         layout.addWidget(self.conn_panel)
+
+        # Big AI Mechanic launcher — always visible & always usable, even
+        # before an adapter is connected. The window can also help connect.
+        self.ai_launch_btn = QPushButton("🔧  AI Mechanic")
+        self.ai_launch_btn.setToolTip(
+            "Open the AI Mechanic in its own resizable window.\n"
+            "Works without a vehicle — it can help find an adapter, "
+            "diagnose Fuse OBD itself, and walk you through fixes."
+        )
+        self.ai_launch_btn.setMinimumHeight(48)
+        self.ai_launch_btn.setStyleSheet(
+            "QPushButton {"
+            "  background-color: #cc6a00;"
+            "  color: white;"
+            "  font-size: 13pt;"
+            "  font-weight: bold;"
+            "  border: 1px solid #ff8800;"
+            "  border-radius: 6px;"
+            "  padding: 8px 16px;"
+            "}"
+            "QPushButton:hover { background-color: #ff8800; }"
+            "QPushButton:pressed { background-color: #aa5500; }"
+        )
+        self.ai_launch_btn.clicked.connect(self._open_ai_mechanic)
+        layout.addWidget(self.ai_launch_btn)
 
         self.notebook = QTabWidget(self)
         self.scanner_panel = ScannerPanel(self.notebook, self._get_vehicle)
@@ -180,9 +246,6 @@ class FuseMainWindow(QMainWindow):
             else:
                 self.global_status.setText("Connected — no CAN channels available")
 
-        # Enable AI Mechanic button now that vehicle is connected
-        self.dtc_panel.ai_btn.setEnabled(True)
-
     def _on_disconnect(self):
         self.monitor_panel.stop_monitor()
         if self.vehicle:
@@ -195,6 +258,67 @@ class FuseMainWindow(QMainWindow):
             warn(self, "Not Connected", "Connect to a vehicle first")
             return None
         return self.vehicle
+
+    # ── AI Mechanic ──
+
+    def _ai_state_provider(self) -> dict:
+        """Snapshot of the host app state that the AI can introspect."""
+        state = {
+            "vehicle_connected": self.vehicle is not None,
+        }
+        try:
+            if self.vehicle is not None:
+                state["channels"] = {
+                    "hs_can": getattr(self.vehicle, "hs_can", None) is not None,
+                    "ms_can": getattr(self.vehicle, "ms_can", None) is not None,
+                }
+        except Exception:
+            pass
+        try:
+            conn = self.conn_panel
+            state["adapter_connected"] = bool(getattr(conn, "connected", False))
+            if conn.devices and conn.device_combo.currentIndex() >= 0:
+                idx = conn.device_combo.currentIndex()
+                if 0 <= idx < len(conn.devices):
+                    d = conn.devices[idx]
+                    state["selected_adapter"] = {
+                        "name": d.name, "vendor": d.vendor,
+                        "port": d.port, "host": d.host,
+                        "is_serial": d.is_serial, "is_wifi": d.is_wifi,
+                    }
+        except Exception:
+            pass
+        try:
+            state["last_vin"] = getattr(self.dtc_panel, "vehicle_info", {}).get("vin")
+        except Exception:
+            pass
+        return state
+
+    def open_ai_mechanic(self, vehicle_info: Optional[dict] = None,
+                         dtc_data: Optional[list] = None):
+        """Public entry-point so panels can open the window with context."""
+        if self._ai_window is None:
+            self._ai_window = AIMechanicWindow(
+                parent_window=self,
+                state_provider=self._ai_state_provider,
+                icon=self.windowIcon(),
+            )
+        self._ai_window.show_with_context(vehicle_info=vehicle_info, dtc_data=dtc_data)
+
+    def _open_ai_mechanic(self):
+        self.open_ai_mechanic()
+
+    def _open_log_folder(self):
+        from modules.issues_log import issues_log_path
+        import subprocess as _sp
+        folder = os.path.dirname(issues_log_path())
+        try:
+            if sys.platform == "win32":
+                _sp.Popen(["explorer", folder])
+            else:
+                _sp.Popen(["xdg-open", folder])
+        except Exception as e:
+            info(self, "Log Folder", f"Logs are stored at:\n{folder}\n\n(Could not open: {e})")
 
     # ── Theme ──
 
@@ -332,6 +456,11 @@ class FuseMainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self._on_disconnect()
+        if self._ai_window is not None:
+            try:
+                self._ai_window.close()
+            except Exception:
+                pass
         super().closeEvent(event)
 
 

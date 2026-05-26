@@ -6,7 +6,7 @@ Professional-grade Ford vehicle diagnostics, security access, and AI-powered fau
 
 - **Module Scanner** — Discover all ECU modules on HS-CAN and MS-CAN buses (PCM, TCM, ABS, BCM, IPC and 15+ others)
 - **Fault Code Reader & Clear** — Read DTCs from every module with active/pending/confirmed status flags
-- **AI Mechanic Chat** — Powered by Claude Opus 4.7 and DeepSeek v4. Real-time mechanic diagnosis with web search for TSBs and forum fixes. Identifies root causes from cascading failure chains
+- **AI Mechanic** — Standalone resizable window with a professional chat UI. 30-year master diagnostician persona powered by Claude Opus 4.7. Searches the web for TSBs and forum fixes, AND self-diagnoses both the car *and* the app itself — listing Windows devices, probing for WiFi/Bluetooth/J2534 adapters, reading Fuse OBD's debug log. Maintains a persistent Issues log with two views of every finding: "plain English" and "for nerds"
 - **Key Programming (PATS)** — Program new keys, erase lost keys, read key counts for Ford vehicles
 - **Factory Settings (As-Built)** — Read/write vehicle configuration. Backup before changes. Enable hidden features
 - **Live Data Monitor** — Real-time PID monitoring with graphing (RPM, speed, coolant temp, O2, fuel trims)
@@ -23,7 +23,7 @@ Windows 10/11 x64 required. No installation — just run the exe.
 
 - Windows 10/11 (x64)
 - J2534-compatible adapter (VCM2, VXDIAG, Tactrix, etc.)
-- AI features require `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_BASE_URL` set in Windows system environment variables
+- AI Mechanic reads its credentials from `MOD_AUTH_TOKEN` (or `MOD_API_KEY`) in Windows system environment variables. Optional: `MOD_BASE_URL`, `MOD_MODEL` (defaults to `claude-opus-4-7`)
 
 ## Running from Source
 
