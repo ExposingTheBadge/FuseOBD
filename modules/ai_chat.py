@@ -41,10 +41,53 @@ from modules import issues_log
 # ── Configuration ──────────────────────────────────────────────────────────
 
 
+def _read_windows_registry_env(name: str) -> str:
+    """Read an env var directly from the Windows registry.
+
+    Windows merges HKLM (system) + HKCU (user) into the per-process
+    environment, with USER values taking precedence. That means a user-level
+    var set to an empty string SILENTLY OVERRIDES the system-level value —
+    so even a freshly-launched process sees an empty string. We work around
+    this by consulting the system registry directly when the process env is
+    empty.
+
+    Reads HKLM first (the canonical place for system-wide config like
+    MOD_ANTHROPIC_AUTH_TOKEN), then HKCU as a fallback.
+    """
+    if sys.platform != "win32":
+        return ""
+    try:
+        import winreg  # local import — Windows only
+    except ImportError:
+        return ""
+    for hkey, path in (
+        (winreg.HKEY_LOCAL_MACHINE,
+         r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+        (winreg.HKEY_CURRENT_USER, "Environment"),
+    ):
+        try:
+            with winreg.OpenKey(hkey, path, 0, winreg.KEY_READ) as k:
+                val, _ = winreg.QueryValueEx(k, name)
+                if isinstance(val, str) and val.strip():
+                    return val
+        except OSError:
+            continue
+    return ""
+
+
 def _env_first(*names: str, default: str = "") -> str:
+    """Return the first non-empty value among the given env var names.
+
+    Falls back to reading directly from the Windows registry when the
+    process environment is missing or empty.
+    """
     for n in names:
-        v = os.environ.get(n)
-        if v:
+        v = os.environ.get(n) or ""
+        if v.strip():
+            return v
+    for n in names:
+        v = _read_windows_registry_env(n)
+        if v.strip():
             return v
     return default
 
@@ -66,6 +109,51 @@ MODEL = _env_first(
     "MOD_DEFAULT_OPUS_MODEL",
     default="claude-opus-4-7",
 )
+
+
+def diagnose_config() -> dict:
+    """Return a diagnostic snapshot of where each setting came from.
+
+    The AI Mechanic window calls this when the user hits the
+    "Show diagnostic" button on the not-configured error so the user
+    can see exactly what FuseOBD is seeing for each variable.
+    """
+    var_groups = {
+        "AUTH_TOKEN": ["MOD_ANTHROPIC_AUTH_TOKEN", "MOD_ANTHROPIC_API_KEY",
+                       "MOD_AUTH_TOKEN", "MOD_API_KEY"],
+        "BASE_URL":   ["MOD_ANTHROPIC_BASE_URL", "MOD_BASE_URL"],
+        "MODEL":      ["MOD_ANTHROPIC_MODEL", "MOD_ANTHROPIC_DEFAULT_OPUS_MODEL",
+                       "MOD_MODEL", "MOD_DEFAULT_OPUS_MODEL"],
+    }
+    result: dict = {}
+    for setting, names in var_groups.items():
+        rows = []
+        for n in names:
+            proc_v = os.environ.get(n)
+            reg_v = _read_windows_registry_env(n) if sys.platform == "win32" else ""
+            rows.append({
+                "name": n,
+                "in_process_env": _redact(proc_v),
+                "in_registry":    _redact(reg_v),
+            })
+        result[setting] = {
+            "resolved": _redact(globals().get(setting, "")),
+            "candidates": rows,
+        }
+    return result
+
+
+def _redact(value) -> str:
+    if value is None:
+        return "(unset)"
+    if not isinstance(value, str):
+        value = str(value)
+    if not value.strip():
+        return '(empty "")'
+    if len(value) <= 12:
+        return value
+    # Show first 6 + last 4 for tokens so the user can confirm without leaking.
+    return f"{value[:6]}…{value[-4:]} (len={len(value)})"
 
 
 SYSTEM_PROMPT = """You are a master automotive diagnostician with 30 years of hands-on experience across ALL vehicle makes — Ford, GM, Toyota, Honda, BMW, Mercedes, VW, Hyundai, Kia, Nissan, Chrysler, Subaru, Mazda, Volvo, Land Rover, and everything else. You work on cars every day. You think like a mechanic, not a computer.
