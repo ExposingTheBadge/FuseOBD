@@ -183,6 +183,13 @@ class _Bubble(QFrame):
 
 class _IssuesBridge(QObject):
     changed = pyqtSignal()
+    # Cross-thread bridge for any callable that needs to run on the UI thread.
+    # Worker threads emit `run_on_ui` with a 0-arg callable; the slot just
+    # invokes it. Using a signal (which Qt marshals across threads via the
+    # event loop) is the only safe way — QTimer.singleShot does NOT work
+    # when called from a non-Qt worker thread (creates the timer in the
+    # worker, which has no event loop, so it never fires).
+    run_on_ui = pyqtSignal(object)
 
 
 # ── window ──────────────────────────────────────────────────────────────────
@@ -213,6 +220,11 @@ class AIMechanicWindow(QMainWindow):
 
         self._bridge = _IssuesBridge()
         self._bridge.changed.connect(self._refresh_issues)
+        # Cross-thread "run this callable on the UI thread" signal.
+        # Qt::AutoConnection on a signal emitted from a worker thread
+        # becomes a QueuedConnection automatically — i.e. the call is
+        # marshalled onto the receiver's event loop (the UI thread).
+        self._bridge.run_on_ui.connect(self._invoke_on_ui)
 
         self._build_ui()
         self._refresh_issues()
@@ -640,12 +652,23 @@ class AIMechanicWindow(QMainWindow):
     # ── thread hop helper ──
 
     def _post_to_ui(self, fn: Callable):
-        """Schedule a callable on the Qt main thread."""
-        from PyQt6.QtCore import QMetaObject, Qt as _Qt
-        # The cleanest cross-thread invocation is via a 0-shot QTimer
-        # owned by a UI object (this window itself).
-        from PyQt6.QtCore import QTimer
-        QTimer.singleShot(0, fn)
+        """Schedule a callable on the Qt main thread.
+
+        Safe to call from any thread. Emitting `run_on_ui` from a worker
+        thread queues the call onto the UI thread's event loop via Qt's
+        auto-connection logic (cross-thread signal => QueuedConnection).
+        """
+        try:
+            self._bridge.run_on_ui.emit(fn)
+        except Exception as e:
+            issues_log.log_error(f"_post_to_ui emit failed: {e}", exc=e)
+
+    def _invoke_on_ui(self, fn):
+        """UI-thread receiver for the run_on_ui signal."""
+        try:
+            fn()
+        except Exception as e:
+            issues_log.log_error(f"_post_to_ui callback raised: {e}", exc=e)
 
 
 # ── issue detail dialog ─────────────────────────────────────────────────────
