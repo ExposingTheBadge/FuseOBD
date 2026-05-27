@@ -135,6 +135,7 @@ def build():
             "--hidden-import", "gui.panels.bus_monitor_panel",
             "--hidden-import", "gui.panels.account_panel",
             "--hidden-import", "gui.auth_dialog",
+            "--hidden-import", "gui.change_password_dialog",
             "--hidden-import", "modules.vehicle_info",
             "--hidden-import", "modules.updater",
             "--hidden-import", "modules.pats",
