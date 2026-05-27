@@ -345,10 +345,36 @@ class AuthDialog(QDialog):
         self._validate()
         self.go.setText("Sign in" if self._mode == "login" else "Create account")
         if ok:
+            # If an admin reset this user's password, force them through
+            # a password-change dialog before we let them in.
+            if account.must_change_password():
+                self._force_password_change()
             self.accept()
         else:
             self.error.setText(message)
             self.error.setVisible(True)
+
+    def _force_password_change(self):
+        # Local import keeps this dialog optional/lazy and avoids any
+        # circular-import risk when the change-password dialog ever
+        # grows its own AuthDialog usage.
+        from gui.change_password_dialog import ChangePasswordDialog
+        from PyQt6.QtWidgets import QMessageBox
+        while account.must_change_password():
+            dlg = ChangePasswordDialog(self, forced=True)
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                # User dismissed the forced dialog (shouldn't be
+                # possible given the close-button is disabled — but be
+                # defensive). Sign them out so they can't proceed with
+                # the temporary password still active.
+                try: account.logout()
+                except Exception: pass
+                QMessageBox.information(
+                    self, "Password change required",
+                    "You must change the temporary password before you "
+                    "can use Fuse OBD. Signing you out.",
+                )
+                return
 
     # ── Google OAuth desktop flow ──
     def _probe_google(self):
@@ -410,6 +436,8 @@ class AuthDialog(QDialog):
     def _on_google_poll(self, status: str, user_obj, err: str):
         if status == "complete":
             self._end_google_flow(None)
+            if account.must_change_password():
+                self._force_password_change()
             self.accept()
             return
         if status == "error":

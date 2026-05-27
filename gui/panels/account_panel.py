@@ -11,12 +11,13 @@ from typing import Optional
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+    QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
     QProgressBar, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from modules import account
 from gui.auth_dialog import AuthDialog
+from gui.change_password_dialog import ChangePasswordDialog
 
 
 # Feature display names — must match server-side keys exactly.
@@ -286,6 +287,34 @@ class AccountPanel(QWidget):
         self.feature_grid.setSpacing(6)
         si.addWidget(self.feature_grid_box)
 
+        # ── Security section
+        sec_title = QLabel("Security")
+        sec_title.setFont(ttf2)
+        sec_title.setStyleSheet("margin-top:6px;")
+        si.addWidget(sec_title)
+
+        sec_row = QHBoxLayout()
+        sec_row.setContentsMargins(0, 0, 0, 0)
+        self.change_pw_btn = QPushButton("Change password")
+        self.change_pw_btn.setStyleSheet(
+            "QPushButton { background:transparent; color:#ccc; "
+            "border:1px solid #2e2e36; border-radius:6px; padding:6px 14px; }"
+            "QPushButton:hover { background:#15151a; color:#fff; }"
+        )
+        self.change_pw_btn.clicked.connect(self._open_change_password)
+        sec_row.addWidget(self.change_pw_btn)
+
+        self.revoke_btn = QPushButton("Sign out other devices")
+        self.revoke_btn.setStyleSheet(self.change_pw_btn.styleSheet())
+        self.revoke_btn.setToolTip(
+            "Boots every other device signed into your account "
+            "(this device stays signed in)."
+        )
+        self.revoke_btn.clicked.connect(self._revoke_others)
+        sec_row.addWidget(self.revoke_btn)
+        sec_row.addStretch(1)
+        si.addLayout(sec_row)
+
         # ── Devices section
         dev_title = QLabel("Devices")
         dev_title.setFont(ttf2)
@@ -455,6 +484,44 @@ class AccountPanel(QWidget):
         # render fresh regardless — user may have signed in OR closed
         self.render_state()
 
+    def _open_change_password(self):
+        if not account.is_signed_in():
+            self._open_auth_dialog()
+            if not account.is_signed_in():
+                return
+        dlg = ChangePasswordDialog(self, forced=False)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            QMessageBox.information(
+                self, "Password updated",
+                "Your password was updated. Other devices have been "
+                "signed out.",
+            )
+            self.render_state()
+
+    def _revoke_others(self):
+        if not account.is_signed_in():
+            return
+        reply = QMessageBox.question(
+            self,
+            "Sign out other devices",
+            "Sign out every other device signed into this account?\n\n"
+            "This device will stay signed in.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            n = account.revoke_other_sessions()
+        except account.AccountError as e:
+            QMessageBox.warning(self, "Couldn't revoke sessions", e.message)
+            return
+        QMessageBox.information(
+            self, "Other devices signed out",
+            f"Signed out {n} other session(s)." if n
+            else "No other devices were signed in.",
+        )
+
     def _open_pricing(self):
         webbrowser.open(account.base_url() + "/pricing")
 
@@ -537,7 +604,7 @@ class AccountPanel(QWidget):
 
         # Stripe button — primary
         if stripe_ready:
-            self.upgrade_btn.setText(f"Subscribe with card  ·  {price_label}")
+            self.upgrade_btn.setText(f"PURCHASE PRO  ·  {price_label}")
             self.upgrade_btn.setEnabled(True)
             self.upgrade_btn.setToolTip(
                 "Opens secure Stripe Checkout in your browser."

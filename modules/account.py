@@ -284,6 +284,46 @@ def register(email: str, password: str) -> dict:
     raise AccountError(_err_message(body, "Registration failed"), status)
 
 
+def change_password(current_password: str, new_password: str) -> None:
+    """Change the signed-in user's password. Raises AccountError on
+    failure (wrong current password, weak new password, network)."""
+    if not _session_token:
+        raise AccountError("Sign in first.", 401)
+    status, body = _http("POST", "/api/v1/auth/change-password",
+                         {"current_password": current_password,
+                          "new_password": new_password},
+                         token=_session_token)
+    if status == 200 and body.get("ok"):
+        _log("account: password changed")
+        # Re-pull /me so cached `must_change_password` flag flips off
+        try: refresh()
+        except Exception: pass
+        return
+    raise AccountError(_err_message(body, "Could not change password"), status)
+
+
+def revoke_other_sessions() -> int:
+    """Boots every other session for this user (keeps the current one).
+    Returns number of sessions revoked."""
+    if not _session_token:
+        raise AccountError("Sign in first.", 401)
+    status, body = _http("POST", "/api/v1/auth/revoke-sessions",
+                         {"keep_current": True},
+                         token=_session_token)
+    if status == 200 and body.get("ok"):
+        n = int(body.get("revoked") or 0)
+        _log(f"account: revoked {n} other session(s)")
+        return n
+    raise AccountError(_err_message(body, "Could not revoke sessions"), status)
+
+
+def must_change_password() -> bool:
+    """True if the server has flagged this user as needing to change
+    their password before continuing (typically after an admin reset)."""
+    u = _cached_user
+    return bool(u and u.get("must_change_password"))
+
+
 def google_available() -> bool:
     """Returns True if the server has Google OAuth configured."""
     try:
