@@ -381,7 +381,16 @@ class FuseMainWindow(QMainWindow):
 
     def open_ai_mechanic(self, vehicle_info: Optional[dict] = None,
                          dtc_data: Optional[list] = None):
-        """Public entry-point so panels can open the window with context."""
+        """Public entry-point so panels can open the window with context.
+
+        AI Mechanic requires a signed-in account so the server can enforce
+        per-user quotas. If the user isn't signed in we prompt them first
+        and only open the window if sign-in succeeds.
+        """
+        if not account.is_signed_in():
+            if not self._prompt_signin_for_ai():
+                return
+
         if self._ai_window is None:
             self._ai_window = AIMechanicWindow(
                 parent_window=self,
@@ -390,6 +399,14 @@ class FuseMainWindow(QMainWindow):
                 icon=self.windowIcon(),
             )
         self._ai_window.show_with_context(vehicle_info=vehicle_info, dtc_data=dtc_data)
+
+    def _prompt_signin_for_ai(self) -> bool:
+        """Show AuthDialog so the user can sign in before chatting with
+        the AI Mechanic. Returns True iff the user finished signed-in."""
+        dlg = AuthDialog(self, allow_skip=True)
+        dlg.exec()
+        self._apply_tier_gating()  # tab gating may need to change
+        return account.is_signed_in()
 
     def _open_ai_mechanic(self):
         self.open_ai_mechanic()
@@ -412,9 +429,25 @@ class FuseMainWindow(QMainWindow):
     def _apply_tier_gating(self):
         """Enable Pro-only tabs only if the user's tier includes that
         feature. Free-tier users see lock icons on the locked tabs and
-        a tooltip explaining the upgrade path."""
+        a tooltip explaining the upgrade path. Also refreshes the AI
+        Mechanic launch button's tooltip so users know what they'll get
+        before they click."""
         try:
             anon = not account.is_signed_in()
+            try:
+                if anon:
+                    self.ai_launch_btn.setToolTip(
+                        "AI Mechanic — requires a free account.\n"
+                        "Click to sign in or create one (no credit card)."
+                    )
+                else:
+                    self.ai_launch_btn.setToolTip(
+                        "Open the AI Mechanic in its own resizable window.\n"
+                        "Works without a vehicle — it can help find an adapter, "
+                        "diagnose Fuse OBD itself, and walk you through fixes."
+                    )
+            except Exception:
+                pass
             for feature_key, idx in self._feature_tabs.items():
                 unlocked = (not anon) and account.has_feature(feature_key)
                 self.notebook.setTabEnabled(idx, unlocked)

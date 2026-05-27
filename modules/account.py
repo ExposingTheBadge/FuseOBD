@@ -357,6 +357,34 @@ def request_upgrade(note: str = "") -> None:
     raise AccountError(_err_message(body, "Upgrade request failed"), status)
 
 
+def billing_config() -> Optional[dict]:
+    """Public — returns server's /api/v1/billing/config response with
+    plan prices, currency, computed annual discount, and whether Stripe
+    checkout is wired up. Returns None on network failure."""
+    try:
+        status, body = _http("GET", "/api/v1/billing/config")
+        if status == 200 and isinstance(body, dict):
+            return body
+    except Exception:
+        pass
+    return None
+
+
+def begin_checkout(interval: str) -> Optional[str]:
+    """Asks the server for a Stripe Checkout URL. Returns the URL on
+    success, raises AccountError otherwise. `interval` must be
+    'monthly' or 'yearly'."""
+    if interval not in ("monthly", "yearly"):
+        raise AccountError("interval must be 'monthly' or 'yearly'.", 400)
+    if not _session_token:
+        raise AccountError("Sign in first.", 401)
+    status, body = _http("POST", "/api/v1/billing/checkout",
+                         {"interval": interval}, token=_session_token)
+    if status == 200 and body.get("checkout_url"):
+        return body["checkout_url"]
+    raise AccountError(_err_message(body, "Could not start checkout"), status)
+
+
 def has_feature(name: str) -> bool:
     u = _cached_user
     if not u:

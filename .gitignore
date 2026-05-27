@@ -37,6 +37,8 @@ version_info.txt
 issues.json
 fuse_obd.log
 sessions.json
+machine_id
+.fuse_session
 
 # Stray previews / scratch
 fuse-obd-icon-preview.png
