@@ -7,7 +7,7 @@
 #define MyAppName        "Fuse OBD"
 #define MyAppVersion     "2.0.0.7"
 #define MyAppPublisher   "Brent Gordon"
-#define MyAppURL         "https://fuse-obd.com"
+#define MyAppURL         "https://fuseobd.com"
 #define MyAppExeName     "FuseOBD.exe"
 #define MyAppExeSource   "dist\FuseOBD-v2.0.0.7.exe"
 #define MyDriversDir     "drivers"
