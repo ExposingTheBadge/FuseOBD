@@ -15,7 +15,7 @@ The mechanic can:
    what we use on the dev workstation.
 2. **Hosted Fuse OBD proxy (default for end users)** — if no local
    token is present, the client connects to `HOSTED_PROXY_BASE_URL`
-   (`http://150.195.114.185:8080/api/ai`). The Fuse-Web Node server
+   (`https://fuseobd.com/api/ai`). The Fuse-Web Node server
    adds the real upstream auth header and forwards to DeepSeek. End
    users need ZERO configuration.
 
@@ -32,6 +32,7 @@ import ssl
 import subprocess
 import sys
 import time
+from typing import Optional
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -118,7 +119,7 @@ LOCAL_MODEL = _env_first(
 # `base_url = HOSTED_PROXY_BASE_URL` and the SDK appends /v1/messages.
 HOSTED_PROXY_BASE_URL = os.environ.get(
     "FUSE_AI_ENDPOINT_OVERRIDE",
-    "http://150.195.114.185:8080/api/ai",
+    "https://fuseobd.com/api/ai",
 )
 HOSTED_PROXY_MODEL = "deepseek-v4-pro"  # server overrides if MOD_ANTHROPIC_MODEL set
 
@@ -547,6 +548,7 @@ class MechanicChat:
         self.vehicle_info: dict = {}
         self.dtc_data: list = []
         self._client = None
+        self._client_session_token: Optional[str] = None  # to detect sign-in/out
         self._state_provider = state_provider
         self._on_tool_call = on_tool_call
         self._tool_bridge = tool_bridge
@@ -561,28 +563,46 @@ class MechanicChat:
         return True
 
     def _get_client(self):
-        if self._client is None:
-            if USE_HOSTED_PROXY:
-                from modules.machine_id import get_machine_id
-                try:
-                    from version import VERSION
-                except Exception:
-                    VERSION = "?"
-                kwargs = {
-                    "api_key": "hosted-proxy",  # placeholder; proxy injects real auth
-                    "base_url": HOSTED_PROXY_BASE_URL,
-                    "timeout": 120.0,
-                    "default_headers": {
-                        "x-fuse-client": f"FuseOBD/{VERSION}",
-                        "x-fuse-machine-id": get_machine_id(),
-                        "x-fuse-os": f"{platform.system()}-{platform.release()}",
-                    },
-                }
-            else:
-                kwargs = {"api_key": LOCAL_AUTH_TOKEN, "timeout": 120.0}
-                if LOCAL_BASE_URL:
-                    kwargs["base_url"] = LOCAL_BASE_URL
-            self._client = anthropic.Anthropic(**kwargs)
+        # Re-create the client whenever the user signs in or out so the
+        # Bearer header is always current. Cheap — Anthropic() just
+        # constructs the object; no network I/O.
+        current_token: Optional[str] = None
+        if USE_HOSTED_PROXY:
+            try:
+                from modules import account
+                current_token = account.auth_token()
+            except Exception:
+                current_token = None
+
+        if self._client is not None and self._client_session_token == current_token:
+            return self._client
+
+        if USE_HOSTED_PROXY:
+            from modules.machine_id import get_machine_id
+            try:
+                from version import VERSION
+            except Exception:
+                VERSION = "?"
+            headers = {
+                "x-fuse-client": f"FuseOBD/{VERSION}",
+                "x-fuse-machine-id": get_machine_id(),
+                "x-fuse-os": f"{platform.system()}-{platform.release()}",
+            }
+            if current_token:
+                headers["Authorization"] = f"Bearer {current_token}"
+            kwargs = {
+                "api_key": "hosted-proxy",  # placeholder; proxy reads Bearer header
+                "base_url": HOSTED_PROXY_BASE_URL,
+                "timeout": 120.0,
+                "default_headers": headers,
+            }
+        else:
+            kwargs = {"api_key": LOCAL_AUTH_TOKEN, "timeout": 120.0}
+            if LOCAL_BASE_URL:
+                kwargs["base_url"] = LOCAL_BASE_URL
+
+        self._client = anthropic.Anthropic(**kwargs)
+        self._client_session_token = current_token
         return self._client
 
     # ── session lifecycle ──
