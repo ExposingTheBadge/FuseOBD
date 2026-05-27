@@ -115,7 +115,7 @@ LOCAL_MODEL = _env_first(
 
 # ── Hosted Fuse OBD proxy (the default for end users) ─────────────────
 # Points at the Node server in D:\APP\Fuse-Web — `server.js` on the
-# same box as fuse-obd.com. Anthropic-compatible: the client uses
+# same box as fuseobd.com. Anthropic-compatible: the client uses
 # `base_url = HOSTED_PROXY_BASE_URL` and the SDK appends /v1/messages.
 HOSTED_PROXY_BASE_URL = os.environ.get(
     "FUSE_AI_ENDPOINT_OVERRIDE",

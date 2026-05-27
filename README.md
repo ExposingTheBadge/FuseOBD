@@ -1,6 +1,6 @@
 # Fuse OBD — Ford Utility for Scanning & Engineering
 
-Professional-grade Ford vehicle diagnostics, security access, and AI-powered fault analysis. Free and open source.
+Professional-grade Ford vehicle diagnostics, security access, and AI-powered fault analysis. Open source (GPL-3.0). Free tier covers VIN, DTC read, DTC clear, and a small AI Mechanic allowance; Pro unlocks the full toolset.
 
 ## Features
 

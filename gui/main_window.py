@@ -33,7 +33,7 @@ from modules import account
 
 
 AUTHOR = "Brent Gordon"
-HOMEPAGE = "https://fuse-obd.com"
+HOMEPAGE = "https://fuseobd.com"
 LICENSE_TEXT = (
     f"Fuse OBD — {APP_DESC}\n"
     f"Copyright (C) 2026 {AUTHOR}\n\n"
@@ -247,7 +247,7 @@ class FuseMainWindow(QMainWindow):
         layout.addWidget(self.notebook, stretch=1)
         self.setCentralWidget(central)
 
-        self.global_status = QLabel(f"{APP_NAME} v{VERSION} — Free and open source (GPL-3.0)")
+        self.global_status = QLabel(f"{APP_NAME} v{VERSION} — Open source (GPL-3.0)")
         status_bar = QStatusBar(self)
         status_bar.addWidget(self.global_status, 1)
         self.setStatusBar(status_bar)
@@ -564,16 +564,15 @@ class FuseMainWindow(QMainWindow):
         creator.setAlignment(Qt.AlignmentFlag.AlignCenter)
         v.addWidget(creator)
 
-        lic = QLabel("Free and open source — GNU GPL v3")
+        lic = QLabel("Open source — GNU GPL v3")
         lic.setStyleSheet("color: #2070c0;")
         lic.setAlignment(Qt.AlignmentFlag.AlignCenter)
         v.addWidget(lic)
 
         features = QLabel(
-            "Module Scanner  |  Fault Reader/Clear  |  AI Mechanic Chat\n"
-            "Key Programming (PATS)  |  Factory Settings Read/Write\n"
-            "Live PID Monitor  |  Security Access  |  VIN Decoder\n\n"
-            "No licensing. No subscriptions. No limits."
+            "Free tier: VIN  |  DTC Read  |  DTC Clear  |  AI Mechanic (25 msgs/mo)\n"
+            "Pro tier:  Scanner  |  PATS  |  As-Built  |  Live Data\n"
+            "           Security Access  |  Bus Monitor  |  Unlimited AI Mechanic"
         )
         features.setStyleSheet("color: gray;")
         features.setAlignment(Qt.AlignmentFlag.AlignCenter)

@@ -38,14 +38,6 @@ class DTCPanel(BasePanel):
         self.clear_btn.clicked.connect(self._clear_all)
         tb.addWidget(self.clear_btn)
 
-        self.ai_btn = QPushButton("AI Mechanic — diagnose these")
-        self.ai_btn.setToolTip(
-            "Open the AI Mechanic window with the current vehicle and "
-            "fault list preloaded for diagnosis."
-        )
-        self.ai_btn.clicked.connect(self._open_ai_with_dtcs)
-        tb.addWidget(self.ai_btn)
-
         self.progress = QProgressBar()
         self.progress.setFixedWidth(150)
         tb.addWidget(self.progress)
@@ -72,15 +64,6 @@ class DTCPanel(BasePanel):
         for col, w in enumerate([60, 70, 220, 65, 180]):
             self.tree.setColumnWidth(col, w)
         left_v.addWidget(self.tree, stretch=1)
-
-        hint = QLabel(
-            "AI Mechanic is now its own window — click the big orange "
-            "<b>AI Mechanic</b> button above the tabs (or here on the toolbar) "
-            "to open it. It works with or without a vehicle connected."
-        )
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color:#888; padding:6px;")
-        left_v.addWidget(hint)
 
         main_split.addWidget(left)
 
@@ -177,11 +160,10 @@ class DTCPanel(BasePanel):
             self.after(0, lambda: self._populate_results(all_dtcs))
             self.after(0, lambda: self.count_label.setText(f"{total} faults found"))
             self.after(0, lambda: self.status_label.setText(
-                f"Read complete. {total} faults. Click AI Mechanic to diagnose."))
+                f"Read complete. {total} faults found."))
             self.after(0, lambda: self.progress.setValue(100))
             self.after(0, lambda: self.read_btn.setEnabled(True))
             self.after(0, lambda: self.clear_btn.setEnabled(True))
-            self.after(0, lambda: self.ai_btn.setEnabled(True))
 
         run_thread(thread)
 
