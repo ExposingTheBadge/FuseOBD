@@ -1,10 +1,10 @@
 """Sign-in / sign-up dialog shown on first launch.
 
 Two tabs: Sign in / Create account. Shares the same Fuse OBD palette
-as the rest of the app. Closes itself on success. Allows "Skip for now"
-which leaves the app in anonymous mode — the user can still browse the
-panels Free-tier allows, but cannot use the AI Mechanic until they sign
-in.
+as the rest of the app. Closes itself on success. The user can still
+dismiss the dialog with the window's X — closing it just means they
+don't sign in this session (Free-tier features that don't require an
+account are still usable; the AI Mechanic stays locked).
 """
 from __future__ import annotations
 
@@ -15,11 +15,12 @@ from typing import Callable, Optional
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QApplication, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
     QMessageBox, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from modules import account
+from gui import theme as gui_theme
 
 
 class _AuthWorker(QThread):
@@ -99,12 +100,14 @@ class AuthDialog(QDialog):
         QDialog.DialogCode.Rejected   — user dismissed / skipped
     """
 
-    def __init__(self, parent: Optional[QWidget] = None, allow_skip: bool = True):
+    def __init__(self, parent: Optional[QWidget] = None, allow_skip: bool = False):
         super().__init__(parent)
         self.setWindowTitle("Fuse OBD — Sign in")
         self.setModal(True)
         self.setMinimumWidth(440)
         self.resize(460, 520)
+        # `allow_skip` kept for API back-compat but no longer surfaces
+        # a visible button — the user can still close the window via X.
         self._allow_skip = allow_skip
         self._worker: Optional[_AuthWorker] = None
         self._google_begin_worker: Optional[_GoogleBeginWorker] = None
@@ -123,13 +126,40 @@ class AuthDialog(QDialog):
         root.setContentsMargins(28, 28, 28, 22)
         root.setSpacing(14)
 
-        # Brand
+        # Brand row — brand label centered, theme toggle in the right
+        # corner. The toggle flips the whole app theme (so the change
+        # persists once the user closes the dialog).
+        brand_row = QHBoxLayout()
+        brand_row.setContentsMargins(0, 0, 0, 0)
+
+        # Left spacer (matches the toggle button on the right so the
+        # brand label stays optically centered).
+        left_spacer = QLabel("")
+        left_spacer.setFixedWidth(36)
+        brand_row.addWidget(left_spacer)
+
+        brand_row.addStretch(1)
         brand = QLabel("FUSE · OBD")
         bf = QFont(); bf.setPointSize(11); bf.setBold(True)
         brand.setFont(bf)
         brand.setStyleSheet("color:#ff8800; letter-spacing:3px;")
         brand.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        root.addWidget(brand)
+        brand_row.addWidget(brand)
+        brand_row.addStretch(1)
+
+        self.theme_btn = QPushButton(self._theme_glyph())
+        self.theme_btn.setFixedSize(36, 28)
+        self.theme_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.theme_btn.setToolTip(self._theme_tooltip())
+        self.theme_btn.setStyleSheet(
+            "QPushButton { background:transparent; border:1px solid #2a2a32; "
+            "border-radius:6px; font-size:14px; color:#888; }"
+            "QPushButton:hover { color:#fff; border-color:#3a3a44; }"
+        )
+        self.theme_btn.clicked.connect(self._toggle_theme)
+        brand_row.addWidget(self.theme_btn)
+
+        root.addLayout(brand_row)
 
         self.title = QLabel("Sign in")
         tf = QFont(); tf.setPointSize(18); tf.setBold(True)
@@ -232,15 +262,11 @@ class AuthDialog(QDialog):
         self.go.clicked.connect(self._submit)
         root.addWidget(self.go)
 
-        # Footer
+        # Footer — pricing link only. The "Skip for now" button was
+        # removed; the user can still close the dialog with the window's
+        # X if they don't want to sign in this session.
         root.addStretch(1)
         footer = QHBoxLayout()
-        if self._allow_skip:
-            self.skip_btn = QPushButton("Skip for now")
-            self.skip_btn.setFlat(True)
-            self.skip_btn.setStyleSheet("color:#888; padding:6px;")
-            self.skip_btn.clicked.connect(self.reject)
-            footer.addWidget(self.skip_btn)
         footer.addStretch(1)
         self.pricing_btn = QPushButton("View pricing")
         self.pricing_btn.setFlat(True)
@@ -248,6 +274,7 @@ class AuthDialog(QDialog):
         self.pricing_btn.clicked.connect(
             lambda: webbrowser.open(account.base_url() + "/pricing"))
         footer.addWidget(self.pricing_btn)
+        footer.addStretch(1)
         root.addLayout(footer)
 
         # Hook Enter on either field to fire submit.
@@ -258,6 +285,24 @@ class AuthDialog(QDialog):
         for w in (self.email, self.pw):
             w.textChanged.connect(self._validate)
         self._validate()
+
+    # ── Theme toggle ──
+    def _theme_glyph(self) -> str:
+        # We're "showing what you'll switch to" — sun glyph when in
+        # dark mode (clicking switches to light), moon when in light.
+        return "\u2600" if gui_theme.current_theme() == "dark" else "\u263E"
+
+    def _theme_tooltip(self) -> str:
+        nxt = "light" if gui_theme.current_theme() == "dark" else "dark"
+        return f"Switch to {nxt} theme"
+
+    def _toggle_theme(self):
+        app = QApplication.instance()
+        if app is None:
+            return
+        gui_theme.toggle_theme(app)
+        self.theme_btn.setText(self._theme_glyph())
+        self.theme_btn.setToolTip(self._theme_tooltip())
 
     def _show_signin(self):
         self.title.setText("Sign in")
@@ -396,9 +441,10 @@ def ensure_signed_in(parent: Optional[QWidget] = None, require: bool = False) ->
     """Show the sign-in dialog if the user isn't signed in. Returns
     True if signed-in by the end of the call.
 
-    When require=True the dialog has no "Skip" option."""
+    `require` is accepted for back-compat but no longer changes the UI
+    (there is no Skip button in either mode now)."""
     if account.is_signed_in():
         return True
-    dlg = AuthDialog(parent, allow_skip=not require)
+    dlg = AuthDialog(parent)
     res = dlg.exec()
     return res == QDialog.DialogCode.Accepted and account.is_signed_in()

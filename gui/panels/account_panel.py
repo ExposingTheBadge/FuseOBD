@@ -245,6 +245,21 @@ class AccountPanel(QWidget):
         self.upgrade_btn.clicked.connect(self._begin_upgrade)
         tc.addWidget(self.upgrade_btn, 7, 0, 1, 2)
 
+        # PayPal alternative. Shown only when the server reports PayPal
+        # is configured. Uses PayPal's brand yellow so it's instantly
+        # recognizable.
+        self.paypal_btn = QPushButton("Subscribe with PayPal")
+        self.paypal_btn.setMinimumHeight(36)
+        self.paypal_btn.setVisible(False)
+        self.paypal_btn.setStyleSheet(
+            "QPushButton { background:#ffc439; color:#0a0a0b; font-weight:700; "
+            "border:none; border-radius:6px; padding:6px 16px; }"
+            "QPushButton:hover { background:#ffb700; }"
+            "QPushButton:disabled { background:#3a3a3f; color:#8a8a92; }"
+        )
+        self.paypal_btn.clicked.connect(self._begin_paypal)
+        tc.addWidget(self.paypal_btn, 8, 0, 1, 2)
+
         self.manage_btn = QPushButton("Manage subscription")
         self.manage_btn.setMinimumHeight(36)
         self.manage_btn.setVisible(False)
@@ -254,7 +269,7 @@ class AccountPanel(QWidget):
             "QPushButton:hover { background:#15151a; color:#fff; }"
         )
         self.manage_btn.clicked.connect(self._open_account_page)
-        tc.addWidget(self.manage_btn, 8, 0, 1, 2)
+        tc.addWidget(self.manage_btn, 9, 0, 1, 2)
 
         si.addWidget(self.tier_card)
 
@@ -357,6 +372,7 @@ class AccountPanel(QWidget):
             self.tier_title.setText("Admin tier")
             self.tier_tag.setText("Lifetime Pro — granted automatically.")
             self.upgrade_btn.setVisible(False)
+            self.paypal_btn.setVisible(False)
             self.manage_btn.setVisible(False)
         elif tier == "pro":
             self.tier_badge.setText("Pro")
@@ -364,6 +380,7 @@ class AccountPanel(QWidget):
             self.tier_title.setText("Pro plan")
             self.tier_tag.setText("Everything unlocked. Unlimited AI Mechanic.")
             self.upgrade_btn.setVisible(False)
+            self.paypal_btn.setVisible(False)
             self.manage_btn.setVisible(True)
         else:
             self.tier_badge.setText("Free")
@@ -372,6 +389,8 @@ class AccountPanel(QWidget):
             self.tier_tag.setText("VIN, DTC read, DTC clear, and limited AI Mechanic.")
             self.upgrade_btn.setVisible(True)
             self.manage_btn.setVisible(False)
+            # PayPal visibility decided inside _paint_pricing once we
+            # know what the server has configured.
 
         # Hide pricing controls for users who already have full access.
         show_pricing = not (is_admin or tier == "pro")
@@ -431,9 +450,9 @@ class AccountPanel(QWidget):
 
     # ── actions ──
     def _open_auth_dialog(self):
-        dlg = AuthDialog(self, allow_skip=True)
+        dlg = AuthDialog(self)
         dlg.exec()
-        # render fresh regardless — user may have signed in OR skipped
+        # render fresh regardless — user may have signed in OR closed
         self.render_state()
 
     def _open_pricing(self):
@@ -479,11 +498,18 @@ class AccountPanel(QWidget):
         self.btn_interval_monthly.setChecked(self._upgrade_interval == "monthly")
         self.btn_interval_yearly.setChecked(self._upgrade_interval == "yearly")
 
-        # When Stripe isn't configured we disable the upgrade button and
-        # surface a "coming soon" message — anything else (a request
-        # form, an alert) is worse UX than just being honest.
+        # We accept EITHER Stripe or PayPal — top-level `configured` on
+        # the server response is true if any processor is ready. We also
+        # peek at the per-processor sub-objects so we know which buttons
+        # to show.
         cfg = self._billing or {}
-        stripe_ready = bool(cfg.get("configured"))
+        any_ready = bool(cfg.get("configured"))
+        stripe_ready = bool((cfg.get("stripe") or {}).get("configured"))
+        paypal_ready = bool((cfg.get("paypal") or {}).get("configured"))
+        # Back-compat: older server responses didn't have nested
+        # sub-objects, so fall back to the legacy top-level flag.
+        if "stripe" not in cfg and any_ready:
+            stripe_ready = True
 
         if self._upgrade_interval == "monthly":
             price_label = monthly.get("label") or (
@@ -509,22 +535,43 @@ class AccountPanel(QWidget):
             else:
                 monthly_caption = f"Equivalent to {eq}."
 
+        # Stripe button — primary
         if stripe_ready:
-            self.upgrade_btn.setText(f"Subscribe to Pro  ·  {price_label}")
+            self.upgrade_btn.setText(f"Subscribe with card  ·  {price_label}")
             self.upgrade_btn.setEnabled(True)
             self.upgrade_btn.setToolTip(
                 "Opens secure Stripe Checkout in your browser."
             )
-            self.price_caption.setText(monthly_caption)
-            self.btn_interval_monthly.setEnabled(True)
-            self.btn_interval_yearly.setEnabled(True)
+            self.upgrade_btn.setVisible(True)
+        elif paypal_ready:
+            # Hide the card button entirely when only PayPal is wired up
+            # so users don't see a dead button next to a live one.
+            self.upgrade_btn.setVisible(False)
         else:
             self.upgrade_btn.setText("Pro signups opening soon")
             self.upgrade_btn.setEnabled(False)
             self.upgrade_btn.setToolTip(
-                "Stripe checkout isn\u2019t set up on this server yet. "
+                "Checkout isn\u2019t set up on this server yet. "
                 "Check back shortly."
             )
+            self.upgrade_btn.setVisible(True)
+
+        # PayPal button — secondary (or sole, if Stripe is off)
+        if paypal_ready:
+            self.paypal_btn.setText(f"Subscribe with PayPal  ·  {price_label}")
+            self.paypal_btn.setEnabled(True)
+            self.paypal_btn.setToolTip(
+                "Opens PayPal subscription approval in your browser."
+            )
+            self.paypal_btn.setVisible(True)
+        else:
+            self.paypal_btn.setVisible(False)
+
+        if any_ready:
+            self.price_caption.setText(monthly_caption)
+            self.btn_interval_monthly.setEnabled(True)
+            self.btn_interval_yearly.setEnabled(True)
+        else:
             self.price_caption.setText(
                 "Checkout opens soon. Free-tier features remain available."
             )
@@ -562,7 +609,7 @@ class AccountPanel(QWidget):
         if not cfg.get("configured"):
             QMessageBox.information(
                 self, "Pro signups opening soon",
-                "Stripe checkout isn\u2019t set up on this server yet. "
+                "Checkout isn\u2019t set up on this server yet. "
                 "Check back shortly.",
             )
             return
@@ -580,6 +627,39 @@ class AccountPanel(QWidget):
             return
         QMessageBox.warning(self, "Checkout error",
                             "Server didn't return a checkout URL. Try again later.")
+
+    def _begin_paypal(self):
+        """Open PayPal subscription approval in the user's browser. The
+        server creates the subscription and returns the approval URL
+        from PayPal, which we launch."""
+        if not account.is_signed_in():
+            self._open_auth_dialog()
+            if not account.is_signed_in():
+                return
+        cfg = self._billing or {}
+        paypal_cfg = (cfg.get("paypal") or {})
+        if not paypal_cfg.get("configured"):
+            QMessageBox.information(
+                self, "PayPal not available",
+                "PayPal isn\u2019t set up on this server yet. "
+                "Check back shortly.",
+            )
+            return
+        try:
+            url = account.begin_paypal_subscribe(self._upgrade_interval)
+        except account.AccountError as e:
+            QMessageBox.warning(self, "PayPal error", e.message)
+            return
+        if url:
+            webbrowser.open(url)
+            self.status_lbl.setText(
+                "Opened PayPal in your browser. After you approve the "
+                "subscription, come back here — your plan refreshes "
+                "automatically."
+            )
+            return
+        QMessageBox.warning(self, "PayPal error",
+                            "Server didn't return a PayPal approval URL. Try again later.")
 
     def _open_account_page(self):
         webbrowser.open(account.base_url() + "/account")

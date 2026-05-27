@@ -375,6 +375,23 @@ def begin_checkout(interval: str) -> Optional[str]:
     raise AccountError(_err_message(body, "Could not start checkout"), status)
 
 
+def begin_paypal_subscribe(interval: str) -> Optional[str]:
+    """Asks the server to create a PayPal subscription. Returns the
+    PayPal approval URL the user should be redirected to. Same shape as
+    begin_checkout(), but uses the PayPal processor on the server side.
+    Once approved, PayPal redirects the browser to
+    /api/v1/billing/paypal/return which flips the user's tier to Pro."""
+    if interval not in ("monthly", "yearly"):
+        raise AccountError("interval must be 'monthly' or 'yearly'.", 400)
+    if not _session_token:
+        raise AccountError("Sign in first.", 401)
+    status, body = _http("POST", "/api/v1/billing/paypal/subscribe",
+                         {"interval": interval}, token=_session_token)
+    if status == 200 and body.get("approval_url"):
+        return body["approval_url"]
+    raise AccountError(_err_message(body, "Could not start PayPal subscription"), status)
+
+
 def has_feature(name: str) -> bool:
     u = _cached_user
     if not u:
