@@ -347,16 +347,6 @@ def logout() -> None:
     _log("account: signed out")
 
 
-def request_upgrade(note: str = "") -> None:
-    if not _session_token:
-        raise AccountError("Sign in first.", 401)
-    status, body = _http("POST", "/api/v1/auth/request-upgrade",
-                         {"note": note}, token=_session_token)
-    if status == 200 and body.get("ok"):
-        return
-    raise AccountError(_err_message(body, "Upgrade request failed"), status)
-
-
 def billing_config() -> Optional[dict]:
     """Public — returns server's /api/v1/billing/config response with
     plan prices, currency, computed annual discount, and whether Stripe

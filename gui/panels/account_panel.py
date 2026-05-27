@@ -47,23 +47,6 @@ class _RefreshThread(QThread):
             self.done.emit(False, None, str(e))
 
 
-class _UpgradeRequestThread(QThread):
-    done = pyqtSignal(bool, str)
-
-    def __init__(self, note: str):
-        super().__init__()
-        self.note = note
-
-    def run(self):
-        try:
-            account.request_upgrade(self.note)
-            self.done.emit(True, "")
-        except account.AccountError as e:
-            self.done.emit(False, e.message)
-        except Exception as e:
-            self.done.emit(False, str(e))
-
-
 class _BillingConfigThread(QThread):
     """Pulls /api/v1/billing/config so the panel can render real plan
     prices instead of hardcoded ones."""
@@ -86,7 +69,6 @@ class AccountPanel(QWidget):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self._refresh_thread: Optional[_RefreshThread] = None
-        self._upgrade_thread: Optional[_UpgradeRequestThread] = None
         self._billing_thread: Optional[_BillingConfigThread] = None
         self._billing: Optional[dict] = None  # cached /api/v1/billing/config
         self._upgrade_interval: str = "yearly"  # default to the better deal
@@ -497,12 +479,17 @@ class AccountPanel(QWidget):
         self.btn_interval_monthly.setChecked(self._upgrade_interval == "monthly")
         self.btn_interval_yearly.setChecked(self._upgrade_interval == "yearly")
 
+        # When Stripe isn't configured we disable the upgrade button and
+        # surface a "coming soon" message — anything else (a request
+        # form, an alert) is worse UX than just being honest.
+        cfg = self._billing or {}
+        stripe_ready = bool(cfg.get("configured"))
+
         if self._upgrade_interval == "monthly":
             price_label = monthly.get("label") or (
                 self._fmt_money(int(monthly.get("amount_cents") or 0), currency) + "/mo"
             )
-            self.upgrade_btn.setText(f"Upgrade to Pro  ·  {price_label}")
-            self.price_caption.setText("Billed monthly. Cancel any time.")
+            monthly_caption = "Billed monthly. Cancel any time."
         else:
             eq = yearly.get("equivalent_monthly_label") or (
                 self._fmt_money(int(yearly.get("equivalent_monthly_cents") or 0), currency)
@@ -511,16 +498,38 @@ class AccountPanel(QWidget):
             yearly_label = yearly.get("label") or (
                 self._fmt_money(int(yearly.get("amount_cents") or 0), currency) + "/yr"
             )
-            self.upgrade_btn.setText(f"Upgrade to Pro  ·  {yearly_label}")
+            price_label = yearly_label
             saved = yearly.get("savings_label") or ""
             if discount > 0 and saved:
-                self.price_caption.setText(
+                monthly_caption = (
                     f"Equivalent to {eq}. Saves {saved}/year vs monthly billing."
                 )
             elif discount > 0:
-                self.price_caption.setText(f"Equivalent to {eq}.  Save {discount}%.")
+                monthly_caption = f"Equivalent to {eq}.  Save {discount}%."
             else:
-                self.price_caption.setText(f"Equivalent to {eq}.")
+                monthly_caption = f"Equivalent to {eq}."
+
+        if stripe_ready:
+            self.upgrade_btn.setText(f"Subscribe to Pro  ·  {price_label}")
+            self.upgrade_btn.setEnabled(True)
+            self.upgrade_btn.setToolTip(
+                "Opens secure Stripe Checkout in your browser."
+            )
+            self.price_caption.setText(monthly_caption)
+            self.btn_interval_monthly.setEnabled(True)
+            self.btn_interval_yearly.setEnabled(True)
+        else:
+            self.upgrade_btn.setText("Pro signups opening soon")
+            self.upgrade_btn.setEnabled(False)
+            self.upgrade_btn.setToolTip(
+                "Stripe checkout isn\u2019t set up on this server yet. "
+                "Check back shortly."
+            )
+            self.price_caption.setText(
+                "Checkout opens soon. Free-tier features remain available."
+            )
+            self.btn_interval_monthly.setEnabled(False)
+            self.btn_interval_yearly.setEnabled(False)
 
     def _fetch_billing_async(self):
         if self._billing_thread and self._billing_thread.isRunning():
@@ -541,59 +550,36 @@ class AccountPanel(QWidget):
         self._paint_pricing()
 
     def _begin_upgrade(self):
-        """Try Stripe checkout in the user's browser when billing is
-        configured; otherwise fall back to the request-upgrade flow that
-        routes to the admin dashboard."""
+        """Open Stripe Checkout in the user's default browser for the
+        currently-selected interval. If Stripe isn't configured the
+        button is already disabled by `_paint_pricing`, so we shouldn't
+        normally get here — but bail safely if we do."""
         if not account.is_signed_in():
             self._open_auth_dialog()
             if not account.is_signed_in():
                 return
         cfg = self._billing or {}
-        if cfg.get("configured"):
-            try:
-                url = account.begin_checkout(self._upgrade_interval)
-            except account.AccountError as e:
-                QMessageBox.warning(self, "Checkout error", e.message)
-                return
-            if url:
-                webbrowser.open(url)
-                self.status_lbl.setText(
-                    "Opened secure checkout in your browser. "
-                    "Come back here after you finish — your plan refreshes automatically."
-                )
-                return
-            QMessageBox.warning(self, "Checkout error",
-                                "Server didn't return a checkout URL. Try again later.")
-            return
-        # Manual upgrade fallback — submit a request to the admin.
-        reply = QMessageBox.question(
-            self, "Request upgrade",
-            "Stripe isn't configured on this server.\n\n"
-            "Submit an upgrade request to the admin instead?\n"
-            "(They'll review it and contact you about payment.)",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-        if self._upgrade_thread and self._upgrade_thread.isRunning():
-            return
-        self.upgrade_btn.setEnabled(False)
-        note = f"Requested Pro ({self._upgrade_interval}) from desktop app."
-        self._upgrade_thread = _UpgradeRequestThread(note)
-        self._upgrade_thread.done.connect(self._on_upgrade_done)
-        self._upgrade_thread.start()
-
-    def _on_upgrade_done(self, ok: bool, err: str):
-        self.upgrade_btn.setEnabled(True)
-        if ok:
+        if not cfg.get("configured"):
             QMessageBox.information(
-                self, "Request sent",
-                "Your upgrade request has been submitted. An admin will "
-                "review it and follow up by email.",
+                self, "Pro signups opening soon",
+                "Stripe checkout isn\u2019t set up on this server yet. "
+                "Check back shortly.",
             )
-        else:
-            QMessageBox.warning(self, "Request failed", err or "Unknown error.")
+            return
+        try:
+            url = account.begin_checkout(self._upgrade_interval)
+        except account.AccountError as e:
+            QMessageBox.warning(self, "Checkout error", e.message)
+            return
+        if url:
+            webbrowser.open(url)
+            self.status_lbl.setText(
+                "Opened secure checkout in your browser. "
+                "Come back here after you finish — your plan refreshes automatically."
+            )
+            return
+        QMessageBox.warning(self, "Checkout error",
+                            "Server didn't return a checkout URL. Try again later.")
 
     def _open_account_page(self):
         webbrowser.open(account.base_url() + "/account")
