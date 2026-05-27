@@ -1,4 +1,10 @@
-"""Application-wide QSS themes."""
+"""Application-wide QSS themes.
+
+Persists the user's chosen theme to disk so it survives restarts.
+Default is "light" (matching the public web UI).
+"""
+import os
+import sys
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPalette, QColor
 from PyQt6.QtWidgets import QApplication
@@ -43,11 +49,55 @@ LIGHT = {
 }
 
 
-_current = "dark"
+_current = "light"
+
+
+def _pref_path() -> str:
+    """Where to save the theme preference. Mirrors issues_log._log_dir
+    but kept independent so theme can persist even if the log dir
+    changes."""
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    folder = os.path.join(base, "FuseOBD") if os.name == "nt" else os.path.join(base, ".fuseobd")
+    try:
+        os.makedirs(folder, exist_ok=True)
+    except Exception:
+        pass
+    return os.path.join(folder, "theme.txt")
+
+
+def load_preferred_theme() -> str:
+    """Reads the persisted preference. Returns 'light' if missing or
+    invalid — we default to light to match the public web UI."""
+    try:
+        with open(_pref_path(), "r", encoding="utf-8") as f:
+            t = (f.read() or "").strip().lower()
+        if t in ("dark", "light"):
+            return t
+    except Exception:
+        pass
+    return "light"
+
+
+def save_preferred_theme(name: str) -> None:
+    if name not in ("dark", "light"):
+        return
+    try:
+        with open(_pref_path(), "w", encoding="utf-8") as f:
+            f.write(name)
+    except Exception:
+        pass
 
 
 def current_theme() -> str:
     return _current
+
+
+def toggle_theme(app: QApplication) -> str:
+    """Flip the theme and persist the choice. Returns the new theme."""
+    new = "dark" if _current == "light" else "light"
+    apply_theme(app, new)
+    save_preferred_theme(new)
+    return new
 
 
 def _palette(c: dict) -> QPalette:
@@ -247,8 +297,9 @@ def _stylesheet(c: dict) -> str:
 
 def apply_theme(app: QApplication, name: str) -> None:
     global _current
-    _current = name
-    c = DARK if name == "dark" else LIGHT
+    _current = name if name in ("dark", "light") else "light"
+    c = DARK if _current == "dark" else LIGHT
     app.setStyle("Fusion")
     app.setPalette(_palette(c))
     app.setStyleSheet(_stylesheet(c))
+    save_preferred_theme(_current)

@@ -22,7 +22,7 @@ from gui.panels.monitor_panel import MonitorPanel
 from gui.panels.security_panel import SecurityPanel
 from gui.panels.bus_monitor_panel import BusMonitorPanel
 from gui.panels.account_panel import AccountPanel
-from gui.theme import apply_theme
+from gui.theme import apply_theme, load_preferred_theme, current_theme, toggle_theme
 from gui.qt_helpers import warn, confirm, info
 from gui.ai_mechanic_window import AIMechanicWindow
 from gui.auth_dialog import AuthDialog
@@ -403,7 +403,7 @@ class FuseMainWindow(QMainWindow):
     def _prompt_signin_for_ai(self) -> bool:
         """Show AuthDialog so the user can sign in before chatting with
         the AI Mechanic. Returns True iff the user finished signed-in."""
-        dlg = AuthDialog(self, allow_skip=True)
+        dlg = AuthDialog(self)
         dlg.exec()
         self._apply_tier_gating()  # tab gating may need to change
         return account.is_signed_in()
@@ -415,12 +415,13 @@ class FuseMainWindow(QMainWindow):
 
     def _maybe_prompt_signin(self):
         """First-run nudge — show the sign-in dialog if there's no saved
-        session. Always skippable so the app stays usable anonymously
-        (Free-tier features only)."""
+        session. The user can dismiss with X if they prefer to browse
+        anonymously; that just keeps the AI Mechanic locked until they
+        sign in later."""
         try:
             if account.is_signed_in():
                 return
-            dlg = AuthDialog(self, allow_skip=True)
+            dlg = AuthDialog(self)
             dlg.exec()
             self._apply_tier_gating()
         except Exception as e:
@@ -628,7 +629,7 @@ class MainWindow:
 
     def __init__(self):
         self.app = QApplication.instance() or QApplication(sys.argv)
-        apply_theme(self.app, "dark")
+        apply_theme(self.app, load_preferred_theme())
         icon_path = _resource_path("fuse.ico")
         if os.path.exists(icon_path):
             self.app.setWindowIcon(QIcon(icon_path))
