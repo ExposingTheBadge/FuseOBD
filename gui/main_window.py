@@ -21,12 +21,15 @@ from gui.panels.asbuilt_panel import AsBuiltPanel
 from gui.panels.monitor_panel import MonitorPanel
 from gui.panels.security_panel import SecurityPanel
 from gui.panels.bus_monitor_panel import BusMonitorPanel
+from gui.panels.account_panel import AccountPanel
 from gui.theme import apply_theme
 from gui.qt_helpers import warn, confirm, info
 from gui.ai_mechanic_window import AIMechanicWindow
+from gui.auth_dialog import AuthDialog
 from version import VERSION, VERSION_SHORT, APP_NAME, APP_DESC, BUILD
 from modules.updater import check_async, UpdateInfo
 from modules import issues_log
+from modules import account
 
 
 AUTHOR = "Brent Gordon"
@@ -71,8 +74,29 @@ class FuseMainWindow(QMainWindow):
 
         self._install_exception_hook()
 
+        # Maps feature key (server-side) -> tab index in self.notebook.
+        # Tabs are gated based on whether the signed-in user's tier
+        # has the feature unlocked.
+        self._feature_tabs: dict[str, int] = {}
+
+        # Load any saved session token off disk and refresh /auth/me
+        # in the background so the Account tab + tier-gating know the
+        # current state before the user clicks anything.
+        try:
+            account.boot()
+        except Exception as e:
+            issues_log.log_app_event(f"account.boot failed: {e}")
+
         self._build_menu()
         self._build_ui()
+
+        # Apply tier-gating once on startup.
+        self._apply_tier_gating()
+
+        # First-run sign-in nudge: if there's no saved session at all,
+        # pop the AuthDialog (skippable) so users hit Account-aware flows
+        # on the very first launch.
+        QTimer.singleShot(800, self._maybe_prompt_signin)
 
         # Silent auto-update check on startup
         QTimer.singleShot(1500, self._auto_check_updates)
@@ -192,14 +216,33 @@ class FuseMainWindow(QMainWindow):
         self.monitor_panel = MonitorPanel(self.notebook, self._get_vehicle)
         self.security_panel = SecurityPanel(self.notebook, self._get_vehicle)
         self.bus_monitor_panel = BusMonitorPanel(self.notebook)
+        self.account_panel = AccountPanel(self.notebook)
+        self.account_panel.state_changed.connect(self._apply_tier_gating)
 
-        self.notebook.addTab(self.scanner_panel, "  Scanner  ")
-        self.notebook.addTab(self.dtc_panel, "  Faults  ")
-        self.notebook.addTab(self.pats_panel, "  Program Keys  ")
-        self.notebook.addTab(self.asbuilt_panel, "  Factory Settings  ")
-        self.notebook.addTab(self.monitor_panel, "  Live Data  ")
-        self.notebook.addTab(self.security_panel, "  Security Access  ")
-        self.notebook.addTab(self.bus_monitor_panel, "  Bus Monitor  ")
+        idx_scanner    = self.notebook.addTab(self.scanner_panel,     "  Scanner  ")
+        idx_dtc        = self.notebook.addTab(self.dtc_panel,         "  Faults  ")
+        idx_pats       = self.notebook.addTab(self.pats_panel,        "  Program Keys  ")
+        idx_asbuilt    = self.notebook.addTab(self.asbuilt_panel,     "  Factory Settings  ")
+        idx_monitor    = self.notebook.addTab(self.monitor_panel,     "  Live Data  ")
+        idx_security   = self.notebook.addTab(self.security_panel,    "  Security Access  ")
+        idx_busmon     = self.notebook.addTab(self.bus_monitor_panel, "  Bus Monitor  ")
+        _idx_account   = self.notebook.addTab(self.account_panel,     "  Account  ")
+
+        # Feature key -> tab index. Faults stays open for everyone
+        # (DTC read + clear are Free-tier features).
+        self._feature_tabs = {
+            "module_scanner":  idx_scanner,
+            "pats":            idx_pats,
+            "asbuilt":         idx_asbuilt,
+            "live_data":       idx_monitor,
+            "security_access": idx_security,
+            "bus_monitor":     idx_busmon,
+        }
+        # Original (unlocked) labels — used to restore after locking.
+        self._tab_titles_unlocked = {
+            idx: self.notebook.tabText(idx).strip()
+            for idx in self._feature_tabs.values()
+        }
 
         layout.addWidget(self.notebook, stretch=1)
         self.setCentralWidget(central)
@@ -350,6 +393,47 @@ class FuseMainWindow(QMainWindow):
 
     def _open_ai_mechanic(self):
         self.open_ai_mechanic()
+
+    # ── Account / tier gating ──
+
+    def _maybe_prompt_signin(self):
+        """First-run nudge — show the sign-in dialog if there's no saved
+        session. Always skippable so the app stays usable anonymously
+        (Free-tier features only)."""
+        try:
+            if account.is_signed_in():
+                return
+            dlg = AuthDialog(self, allow_skip=True)
+            dlg.exec()
+            self._apply_tier_gating()
+        except Exception as e:
+            issues_log.log_app_event(f"sign-in dialog error: {e}")
+
+    def _apply_tier_gating(self):
+        """Enable Pro-only tabs only if the user's tier includes that
+        feature. Free-tier users see lock icons on the locked tabs and
+        a tooltip explaining the upgrade path."""
+        try:
+            anon = not account.is_signed_in()
+            for feature_key, idx in self._feature_tabs.items():
+                unlocked = (not anon) and account.has_feature(feature_key)
+                self.notebook.setTabEnabled(idx, unlocked)
+                base = self._tab_titles_unlocked.get(idx, "")
+                if unlocked:
+                    self.notebook.setTabText(idx, f"  {base}  ")
+                    self.notebook.setTabToolTip(idx, "")
+                else:
+                    self.notebook.setTabText(idx, f"  🔒 {base}  ")
+                    if anon:
+                        self.notebook.setTabToolTip(
+                            idx, f"Sign in to use {base}. Open the Account tab to sign in."
+                        )
+                    else:
+                        self.notebook.setTabToolTip(
+                            idx, f"{base} is a Pro feature. Upgrade from the Account tab."
+                        )
+        except Exception as e:
+            issues_log.log_app_event(f"tier-gating error: {e}")
 
     def _open_log_folder(self):
         from modules.issues_log import issues_log_path

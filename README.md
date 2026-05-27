@@ -23,7 +23,7 @@ Windows 10/11 x64 required. No installation — just run the exe.
 
 - Windows 10/11 (x64)
 - J2534-compatible adapter (VCM2, VXDIAG, Tactrix, etc.)
-- AI Mechanic works out of the box for end users — no API key, no environment variables, no setup. It routes through the hosted Fuse OBD service at `150.195.114.185:8080` which holds the upstream LLM credentials.
+- AI Mechanic works out of the box for end users — no API key, no environment variables, no setup. It routes through the hosted Fuse OBD service at `https://fuseobd.com` which holds the upstream LLM credentials.
 - Power users / developers can override by setting `MOD_ANTHROPIC_AUTH_TOKEN` (and optionally `MOD_ANTHROPIC_BASE_URL`, `MOD_ANTHROPIC_MODEL`) in Windows env vars to bypass the hosted proxy and talk directly to their own upstream.
 
 ## Running from Source
