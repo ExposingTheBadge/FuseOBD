@@ -64,6 +64,18 @@ class _UpgradeRequestThread(QThread):
             self.done.emit(False, str(e))
 
 
+class _BillingConfigThread(QThread):
+    """Pulls /api/v1/billing/config so the panel can render real plan
+    prices instead of hardcoded ones."""
+    done = pyqtSignal(object)  # dict or None
+
+    def run(self):
+        try:
+            self.done.emit(account.billing_config())
+        except Exception:
+            self.done.emit(None)
+
+
 class AccountPanel(QWidget):
     """Account tab. Always present; content depends on sign-in state."""
 
@@ -75,6 +87,9 @@ class AccountPanel(QWidget):
         super().__init__(parent)
         self._refresh_thread: Optional[_RefreshThread] = None
         self._upgrade_thread: Optional[_UpgradeRequestThread] = None
+        self._billing_thread: Optional[_BillingConfigThread] = None
+        self._billing: Optional[dict] = None  # cached /api/v1/billing/config
+        self._upgrade_interval: str = "yearly"  # default to the better deal
         self._build_ui()
 
         # Auto-refresh every 30 s while the tab is visible.
@@ -82,6 +97,10 @@ class AccountPanel(QWidget):
         self._timer.setInterval(30000)
         self._timer.timeout.connect(self._refresh_async)
         self._timer.start()
+
+        # Pull billing config once on construction (and again each render
+        # for signed-in users, in case prices change while the app is open).
+        self._fetch_billing_async()
 
         # First render.
         self.render_state()
@@ -203,16 +222,46 @@ class AccountPanel(QWidget):
         )
         tc.addWidget(self.quota_bar, 4, 0, 1, 2)
 
+        # Billing-interval toggle (monthly / yearly).
+        self.interval_box = QFrame()
+        ib = QHBoxLayout(self.interval_box)
+        ib.setContentsMargins(0, 10, 0, 0)
+        ib.setSpacing(6)
+        self.btn_interval_monthly = QPushButton("Monthly")
+        self.btn_interval_yearly  = QPushButton("Yearly  ·  save")
+        for b in (self.btn_interval_monthly, self.btn_interval_yearly):
+            b.setCheckable(True)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setStyleSheet(
+                "QPushButton { background:transparent; color:#9a9aa2; "
+                "border:1px solid #2a2a32; border-radius:6px; padding:6px 14px; "
+                "font-size:12px; font-weight:600; }"
+                "QPushButton:hover { color:#ddd; border-color:#3a3a44; }"
+                "QPushButton:checked { background:rgba(255,136,0,0.12); "
+                "color:#ff8800; border-color:rgba(255,136,0,0.45); }"
+            )
+        self.btn_interval_monthly.clicked.connect(lambda: self._set_interval("monthly"))
+        self.btn_interval_yearly.clicked.connect(lambda: self._set_interval("yearly"))
+        ib.addWidget(self.btn_interval_monthly)
+        ib.addWidget(self.btn_interval_yearly)
+        ib.addStretch(1)
+        tc.addWidget(self.interval_box, 5, 0, 1, 2)
+
+        self.price_caption = QLabel("")
+        self.price_caption.setStyleSheet("color:#8a8a92; font-family:Consolas,monospace; "
+                                         "font-size:11px; margin-top:2px;")
+        tc.addWidget(self.price_caption, 6, 0, 1, 2)
+
         # Upgrade / manage row
-        self.upgrade_btn = QPushButton("Upgrade to Pro — $9.99/mo")
+        self.upgrade_btn = QPushButton("Upgrade to Pro")
         self.upgrade_btn.setMinimumHeight(36)
         self.upgrade_btn.setStyleSheet(
             "QPushButton { background:#ff8800; color:#0a0a0b; font-weight:700; "
             "border:none; border-radius:6px; padding:6px 16px; }"
             "QPushButton:hover { background:#ff9c1f; }"
         )
-        self.upgrade_btn.clicked.connect(self._open_pricing)
-        tc.addWidget(self.upgrade_btn, 5, 0, 1, 2)
+        self.upgrade_btn.clicked.connect(self._begin_upgrade)
+        tc.addWidget(self.upgrade_btn, 7, 0, 1, 2)
 
         self.manage_btn = QPushButton("Manage subscription")
         self.manage_btn.setMinimumHeight(36)
@@ -223,7 +272,7 @@ class AccountPanel(QWidget):
             "QPushButton:hover { background:#15151a; color:#fff; }"
         )
         self.manage_btn.clicked.connect(self._open_account_page)
-        tc.addWidget(self.manage_btn, 6, 0, 1, 2)
+        tc.addWidget(self.manage_btn, 8, 0, 1, 2)
 
         si.addWidget(self.tier_card)
 
@@ -342,6 +391,12 @@ class AccountPanel(QWidget):
             self.upgrade_btn.setVisible(True)
             self.manage_btn.setVisible(False)
 
+        # Hide pricing controls for users who already have full access.
+        show_pricing = not (is_admin or tier == "pro")
+        self.interval_box.setVisible(show_pricing)
+        self.price_caption.setVisible(show_pricing)
+        self._paint_pricing()
+
         # Quota bar
         q = u.get("ai_quota") or {}
         limit = q.get("limit")
@@ -401,6 +456,144 @@ class AccountPanel(QWidget):
 
     def _open_pricing(self):
         webbrowser.open(account.base_url() + "/pricing")
+
+    # ── pricing / billing ──
+    @staticmethod
+    def _fmt_money(cents: int, currency: str) -> str:
+        symbols = {"usd": "$", "cad": "C$", "gbp": "£", "eur": "€", "aud": "A$"}
+        sym = symbols.get((currency or "usd").lower(), (currency or "USD").upper() + " ")
+        whole = cents // 100
+        frac = f"{cents % 100:02d}"
+        return f"{sym}{whole}.{frac}"
+
+    def _plans(self) -> dict:
+        """Returns the plans dict (currency, monthly, yearly) — server
+        value if available, otherwise a sensible fallback."""
+        if self._billing and isinstance(self._billing.get("plans"), dict):
+            return self._billing["plans"]
+        return {
+            "currency": "usd",
+            "monthly": {"amount_cents": 999, "label": "$9.99/mo"},
+            "yearly":  {"amount_cents": 9900, "label": "$99/yr",
+                        "equivalent_monthly_cents": 825,
+                        "equivalent_monthly_label": "$8.25/mo",
+                        "discount_pct": 17, "savings_label": "$11.88"},
+        }
+
+    def _set_interval(self, interval: str):
+        self._upgrade_interval = "yearly" if interval == "yearly" else "monthly"
+        self._paint_pricing()
+
+    def _paint_pricing(self):
+        plans = self._plans()
+        currency = plans.get("currency", "usd")
+        monthly = plans.get("monthly", {}) or {}
+        yearly = plans.get("yearly", {}) or {}
+        discount = int(yearly.get("discount_pct") or 0)
+
+        self.btn_interval_yearly.setText(
+            f"Yearly  ·  save {discount}%" if discount > 0 else "Yearly"
+        )
+        self.btn_interval_monthly.setChecked(self._upgrade_interval == "monthly")
+        self.btn_interval_yearly.setChecked(self._upgrade_interval == "yearly")
+
+        if self._upgrade_interval == "monthly":
+            price_label = monthly.get("label") or (
+                self._fmt_money(int(monthly.get("amount_cents") or 0), currency) + "/mo"
+            )
+            self.upgrade_btn.setText(f"Upgrade to Pro  ·  {price_label}")
+            self.price_caption.setText("Billed monthly. Cancel any time.")
+        else:
+            eq = yearly.get("equivalent_monthly_label") or (
+                self._fmt_money(int(yearly.get("equivalent_monthly_cents") or 0), currency)
+                + "/mo"
+            )
+            yearly_label = yearly.get("label") or (
+                self._fmt_money(int(yearly.get("amount_cents") or 0), currency) + "/yr"
+            )
+            self.upgrade_btn.setText(f"Upgrade to Pro  ·  {yearly_label}")
+            saved = yearly.get("savings_label") or ""
+            if discount > 0 and saved:
+                self.price_caption.setText(
+                    f"Equivalent to {eq}. Saves {saved}/year vs monthly billing."
+                )
+            elif discount > 0:
+                self.price_caption.setText(f"Equivalent to {eq}.  Save {discount}%.")
+            else:
+                self.price_caption.setText(f"Equivalent to {eq}.")
+
+    def _fetch_billing_async(self):
+        if self._billing_thread and self._billing_thread.isRunning():
+            return
+        self._billing_thread = _BillingConfigThread()
+        self._billing_thread.done.connect(self._on_billing_done)
+        self._billing_thread.start()
+
+    def _on_billing_done(self, cfg):
+        if cfg:
+            self._billing = cfg
+            # Default to whichever interval is the best deal — yearly
+            # whenever a discount exists, monthly otherwise.
+            plans = (cfg or {}).get("plans") or {}
+            yearly = plans.get("yearly") or {}
+            if not (int(yearly.get("discount_pct") or 0) > 0):
+                self._upgrade_interval = "monthly"
+        self._paint_pricing()
+
+    def _begin_upgrade(self):
+        """Try Stripe checkout in the user's browser when billing is
+        configured; otherwise fall back to the request-upgrade flow that
+        routes to the admin dashboard."""
+        if not account.is_signed_in():
+            self._open_auth_dialog()
+            if not account.is_signed_in():
+                return
+        cfg = self._billing or {}
+        if cfg.get("configured"):
+            try:
+                url = account.begin_checkout(self._upgrade_interval)
+            except account.AccountError as e:
+                QMessageBox.warning(self, "Checkout error", e.message)
+                return
+            if url:
+                webbrowser.open(url)
+                self.status_lbl.setText(
+                    "Opened secure checkout in your browser. "
+                    "Come back here after you finish — your plan refreshes automatically."
+                )
+                return
+            QMessageBox.warning(self, "Checkout error",
+                                "Server didn't return a checkout URL. Try again later.")
+            return
+        # Manual upgrade fallback — submit a request to the admin.
+        reply = QMessageBox.question(
+            self, "Request upgrade",
+            "Stripe isn't configured on this server.\n\n"
+            "Submit an upgrade request to the admin instead?\n"
+            "(They'll review it and contact you about payment.)",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        if self._upgrade_thread and self._upgrade_thread.isRunning():
+            return
+        self.upgrade_btn.setEnabled(False)
+        note = f"Requested Pro ({self._upgrade_interval}) from desktop app."
+        self._upgrade_thread = _UpgradeRequestThread(note)
+        self._upgrade_thread.done.connect(self._on_upgrade_done)
+        self._upgrade_thread.start()
+
+    def _on_upgrade_done(self, ok: bool, err: str):
+        self.upgrade_btn.setEnabled(True)
+        if ok:
+            QMessageBox.information(
+                self, "Request sent",
+                "Your upgrade request has been submitted. An admin will "
+                "review it and follow up by email.",
+            )
+        else:
+            QMessageBox.warning(self, "Request failed", err or "Unknown error.")
 
     def _open_account_page(self):
         webbrowser.open(account.base_url() + "/account")
