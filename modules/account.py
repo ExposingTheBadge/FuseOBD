@@ -324,13 +324,28 @@ def must_change_password() -> bool:
     return bool(u and u.get("must_change_password"))
 
 
-def google_available() -> bool:
-    """Returns True if the server has Google OAuth configured."""
+def google_available() -> Optional[bool]:
+    """Returns:
+        True  — server confirmed Google OAuth is configured
+        False — server confirmed Google OAuth is NOT configured
+        None  — couldn't reach the server / probe failed (caller should
+                treat as "unknown" and prefer showing the button rather
+                than hiding it silently)
+    """
     try:
-        status, body = _http("GET", "/api/v1/auth/google/config", timeout=4.0)
-        return status == 200 and bool(body.get("configured"))
-    except AccountError:
-        return False
+        status, body = _http("GET", "/api/v1/auth/google/config", timeout=8.0)
+    except AccountError as e:
+        _log(f"account: google_available probe network error: {e.message}")
+        return None
+    except Exception as e:
+        _log(f"account: google_available probe error: {e}")
+        return None
+    if status == 200 and isinstance(body, dict):
+        configured = bool(body.get("configured"))
+        _log(f"account: google_available probe → configured={configured}")
+        return configured
+    _log(f"account: google_available probe unexpected status={status} body={body}")
+    return None
 
 
 def google_begin() -> dict:
