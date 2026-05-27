@@ -48,14 +48,27 @@ class _AuthWorker(QThread):
 
 
 class _GoogleProbeWorker(QThread):
-    """Async check: is Google OAuth configured server-side?"""
-    done = pyqtSignal(bool)
+    """Async check: is Google OAuth configured server-side?
+    Emits the tri-state:
+      'yes'     — server confirmed Google is configured
+      'no'      — server confirmed Google is NOT configured (hide button)
+      'unknown' — probe failed (network/SSL/timeout) — keep button visible
+                  so users can still try; clicking will surface the
+                  underlying error if Google really isn't set up.
+    """
+    done = pyqtSignal(str)
 
     def run(self):
         try:
-            self.done.emit(account.google_available())
+            result = account.google_available()
         except Exception:
-            self.done.emit(False)
+            result = None
+        if result is True:
+            self.done.emit("yes")
+        elif result is False:
+            self.done.emit("no")
+        else:
+            self.done.emit("unknown")
 
 
 class _GoogleBeginWorker(QThread):
@@ -224,7 +237,11 @@ class AuthDialog(QDialog):
         divider_row.addWidget(dl1, 1); divider_row.addWidget(divider_lbl); divider_row.addWidget(dl2, 1)
         gb_layout.addLayout(divider_row)
 
-        self.google_box.setVisible(False)
+        # Visible by default — we only hide it if the server explicitly
+        # tells us Google is NOT configured. That way a flaky probe
+        # (slow DNS, SSL hiccup, etc.) doesn't make the button vanish
+        # for users who can actually sign in with Google.
+        self.google_box.setVisible(True)
         root.addWidget(self.google_box)
 
         # Form
@@ -382,8 +399,14 @@ class AuthDialog(QDialog):
         self._google_probe.done.connect(self._on_google_probe_done)
         self._google_probe.start()
 
-    def _on_google_probe_done(self, available: bool):
-        self.google_box.setVisible(bool(available))
+    def _on_google_probe_done(self, result: str):
+        # Only hide the box if the server definitively says Google is
+        # not configured. "unknown" (probe failed) keeps it visible so
+        # users can still try.
+        if result == "no":
+            self.google_box.setVisible(False)
+        else:
+            self.google_box.setVisible(True)
 
     def _google_start(self):
         if self._google_begin_worker and self._google_begin_worker.isRunning():
