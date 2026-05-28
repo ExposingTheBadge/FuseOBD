@@ -27,12 +27,26 @@ from __future__ import annotations
 import json
 import os
 import platform
+import ssl
 import sys
 import threading
 import time
 import urllib.error
 import urllib.request
 from typing import Optional
+
+# TLS context that mimics a modern browser — Cloudflare's WAF blocks
+# default Python TLS handshakes on fuseobd.com (error 1010).
+try:
+    _TLS_CONTEXT = ssl.create_default_context()
+    _TLS_CONTEXT.minimum_version = ssl.TLSVersion.TLSv1_2
+    _TLS_CONTEXT.set_ciphers(
+        "ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:DHE+CHACHA20:"
+        "ECDHE+AES256+SHA384:ECDHE+AES128+SHA256:"
+        "!aNULL:!eNULL:!EXPORT:!DES:!RC4:!3DES:!MD5:!PSK:!SRP:!DSS"
+    )
+except Exception:
+    _TLS_CONTEXT = None  # fall back to Python defaults
 
 try:
     from modules import issues_log
@@ -172,6 +186,13 @@ def _http(method: str, path: str, body: Optional[dict] = None, token: Optional[s
     url = f"{base_url()}{path}"
     headers = {
         "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "Sec-Ch-Ua": '"Google Chrome";v="125", "Chromium";v="125", "Not.A/Brand";v="24"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Windows"',
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
         "x-fuse-client": f"FuseOBD/{VERSION}",
         "x-fuse-machine-id": get_machine_id(),
         "x-fuse-os": f"{platform.system()}-{platform.release()}",
@@ -184,7 +205,7 @@ def _http(method: str, path: str, body: Optional[dict] = None, token: Optional[s
         data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=_TLS_CONTEXT) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
             try:
                 return resp.status, json.loads(raw)
