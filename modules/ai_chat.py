@@ -584,6 +584,7 @@ class MechanicChat:
             except Exception:
                 VERSION = "?"
             headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
                 "x-fuse-client": f"FuseOBD/{VERSION}",
                 "x-fuse-machine-id": get_machine_id(),
                 "x-fuse-os": f"{platform.system()}-{platform.release()}",
