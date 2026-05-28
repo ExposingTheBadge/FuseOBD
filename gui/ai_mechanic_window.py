@@ -228,6 +228,10 @@ class AIMechanicWindow(QMainWindow):
         # marshalled onto the receiver's event loop (the UI thread).
         self._bridge.run_on_ui.connect(self._invoke_on_ui)
 
+        self._processing = False
+        self._pending_messages: list[str] = []
+        self._status_bubble: Optional[_Bubble] = None
+
         self._build_ui()
         self._refresh_issues()
         issues_log.subscribe(self._on_log_event)
@@ -448,8 +452,7 @@ class AIMechanicWindow(QMainWindow):
         self._clear_bubbles()
         self._append_bubble("system", "Starting AI Mechanic session...")
         self.status_label.setText("Connecting...")
-        self.send_btn.setEnabled(False)
-        self.input.setEnabled(False)
+        self._set_status("Starting AI Mechanic session...")
 
         self.chat = MechanicChat(state_provider=self._state_provider,
                                  on_tool_call=self._on_tool_call,
@@ -459,8 +462,7 @@ class AIMechanicWindow(QMainWindow):
         except Exception as e:
             self._append_bubble("error", f"Could not start session: {e}")
             self.status_label.setText("Error")
-            self.send_btn.setEnabled(True)
-            self.input.setEnabled(True)
+            self._clear_status()
             return
 
         def worker():
@@ -470,6 +472,7 @@ class AIMechanicWindow(QMainWindow):
                 response = f"Failed to start session: {e}"
             self._post_to_ui(lambda: self._on_assistant_reply(response, kicked_off=True))
 
+        self._processing = True
         threading.Thread(target=worker, daemon=True).start()
 
     def _send_message(self):
@@ -479,11 +482,23 @@ class AIMechanicWindow(QMainWindow):
         text = self.input.toPlainText().strip()
         if not text:
             return
+
+        # If the mechanic is already working, queue this message.
+        if self._processing:
+            self._append_bubble("system", "The mechanic is still working on your last "
+                                "request — your message has been queued.")
+            self._pending_messages.append(text)
+            self.input.clear()
+            return
+
         self.input.clear()
         self._append_bubble("user", text)
+
+        # Friendly acknowledgment so the user knows we're on it.
+        self._set_status("Let me look into that...")
+
+        self._processing = True
         self.status_label.setText("Thinking...")
-        self.send_btn.setEnabled(False)
-        self.input.setEnabled(False)
 
         def worker():
             try:
@@ -505,20 +520,29 @@ class AIMechanicWindow(QMainWindow):
             return
         self.chat = None
         self._initialised = False
+        self._processing = False
+        self._pending_messages.clear()
+        self._status_bubble = None
         self._clear_bubbles()
         self._append_bubble("system", "Chat reset. Type a question to begin.")
         self.status_label.setText("")
 
     def _on_assistant_reply(self, response: str, *, kicked_off: bool = False):
+        self._clear_status()
         if response:
             self._append_bubble("mechanic", response)
         self.status_label.setText("Ready")
-        self.send_btn.setEnabled(True)
-        self.input.setEnabled(True)
+        self._processing = False
         self.input.setFocus()
 
+        # Flush any queued messages.
+        if self._pending_messages:
+            next_text = self._pending_messages.pop(0)
+            self._pending_messages.clear()
+            self._send_message_text(next_text)
+
     def _on_tool_call(self, tool_name: str, params: dict):
-        # Surface tool calls as small status updates so the user sees the AI working.
+        # Surface tool calls inline in the chat so the user sees the AI working.
         readable = {
             "search_web": f"searching the web for: {params.get('query','')}",
             "fetch_page": f"fetching {params.get('url','')}",
@@ -530,7 +554,49 @@ class AIMechanicWindow(QMainWindow):
             "get_app_info": "reading the app state",
             "log_issue": f"logging an issue — {params.get('title','')}",
         }.get(tool_name, tool_name)
-        self._post_to_ui(lambda: self.status_label.setText(f"Mechanic is {readable}..."))
+        self._post_to_ui(lambda: [
+            self.status_label.setText(f"Mechanic is {readable}..."),
+            self._set_status(f"Mechanic is {readable}..."),
+        ])
+
+    # ── inline status bubble ─────────────────────────────────────────────
+
+    def _set_status(self, text: str):
+        """Show or update an inline status bubble in the chat."""
+        self._clear_status()
+        bubble = _Bubble("system", text)
+        index = self.bubbles_layout.count() - 1
+        self.bubbles_layout.insertWidget(index, bubble)
+        self._status_bubble = bubble
+        self._autoscroll()
+
+    def _clear_status(self):
+        if self._status_bubble is not None:
+            # Remove from layout and delete
+            self.bubbles_layout.removeWidget(self._status_bubble)
+            self._status_bubble.deleteLater()
+            self._status_bubble = None
+
+    def _send_message_text(self, text: str):
+        """Send a message string directly (used for queued messages)."""
+        if not text:
+            return
+        self._append_bubble("user", text)
+        self._set_status("Let me look into that...")
+        self._processing = True
+        self.status_label.setText("Thinking...")
+
+        def worker():
+            try:
+                response = self.chat.send_message(text)
+            except Exception as e:
+                response = f"Error: {e}"
+                issues_log.log_exception("AI Mechanic chat failure", e,
+                                         kind=issues_log.KIND_APP,
+                                         source="ai_mechanic_window")
+            self._post_to_ui(lambda: self._on_assistant_reply(response))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     # ── bubbles ──
 
@@ -539,12 +605,17 @@ class AIMechanicWindow(QMainWindow):
         # insert before the trailing stretch
         index = self.bubbles_layout.count() - 1
         self.bubbles_layout.insertWidget(index, bubble)
-        # auto-scroll to bottom
+        self._autoscroll()
+
+    def _autoscroll(self):
+        """Scroll to bottom unless the user has scrolled up to read history."""
         bar = self.scroll.verticalScrollBar()
-        bar.setValue(bar.maximum())
-        # one more time after layout settles
-        from PyQt6.QtCore import QTimer
-        QTimer.singleShot(0, lambda: bar.setValue(bar.maximum()))
+        at_bottom = bar.value() >= bar.maximum() - 48
+        if at_bottom:
+            bar.setValue(bar.maximum())
+            # one more time after layout settles
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(50, lambda: bar.setValue(bar.maximum()))
 
     def _clear_bubbles(self):
         while self.bubbles_layout.count() > 1:
