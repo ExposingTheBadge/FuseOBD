@@ -156,10 +156,45 @@ jobs:
           git push origin HEAD:${{ github.ref_name }}
           git push origin "${{ steps.bump.outputs.tag }}"
 
+      - name: Build release notes
+        id: notes
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.bump.outputs.tag }}"
+          $prevTag = git describe --tags --abbrev=0 "$tag^" 2>$null
+          if (-not $prevTag) { $prevTag = "" }
+
+          if ($prevTag) {
+            $commits = git log "$prevTag..HEAD" --pretty=format:"- %s" --no-merges
+          } else {
+            $commits = git log HEAD --pretty=format:"- %s" --no-merges
+          }
+
+          if (-not $commits) { $commits = "- Internal updates and improvements" }
+
+          $body = @"
+          ## Changes
+
+          $commits
+
+          ### Install
+          Download ``FuseOBD-${tag}.exe`` below and run it. Binaries are Authenticode-signed; Windows will show **Verified publisher: Brent Gordon**.
+
+          "@
+
+          if ($prevTag) {
+            $body += "`n**Full Changelog:** https://github.com/${{ github.repository }}/compare/$prevTag...$tag"
+          }
+
+          $delim = "EOF_NOTES_$([guid]::NewGuid().ToString('N'))"
+          "body<<$delim" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          $body | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          $delim | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.bump.outputs.tag }}
           name: FuseOBD ${{ steps.bump.outputs.tag }}
-          generate_release_notes: true
+          body: ${{ steps.notes.outputs.body }}
           files: dist/signing/FuseOBD-v${{ steps.bump.outputs.version }}.exe
