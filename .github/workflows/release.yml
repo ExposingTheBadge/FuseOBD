@@ -1,0 +1,165 @@
+name: Release (signed)
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version part to bump"
+        required: true
+        default: "minor"
+        type: choice
+        options:
+          - major
+          - minor
+          - patch
+          - build
+
+permissions:
+  contents: write
+  id-token: write  # required for OIDC federated login to Azure
+
+jobs:
+  build-sign-release:
+    runs-on: windows-latest
+
+    env:
+      AZURE_ARTIFACT_SIGNING_ENDPOINT: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+      AZURE_ARTIFACT_SIGNING_ACCOUNT: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+      AZURE_ARTIFACT_SIGNING_CERT_PROFILE: ${{ vars.AZURE_ARTIFACT_SIGNING_CERT_PROFILE }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Bump version
+        id: bump
+        shell: pwsh
+        run: |
+          $bump = "${{ github.event.inputs.bump }}"
+          $content = Get-Content version.py -Raw
+          $major = [int]([regex]::Match($content, 'MAJOR\s*=\s*(\d+)').Groups[1].Value)
+          $minor = [int]([regex]::Match($content, 'MINOR\s*=\s*(\d+)').Groups[1].Value)
+          $patch = [int]([regex]::Match($content, 'PATCH\s*=\s*(\d+)').Groups[1].Value)
+          $build = [int]([regex]::Match($content, 'BUILD\s*=\s*(\d+)').Groups[1].Value)
+
+          switch ($bump) {
+            "major" { $major++; $minor = 0; $patch = 0; $build = 0 }
+            "minor" { $minor++; $patch = 0; $build = 0 }
+            "patch" { $patch++; $build = 0 }
+            "build" { $build++ }
+          }
+
+          $ver = "$major.$minor.$patch.$build"
+          $verShort = "$major.$minor.$patch"
+
+          $appName = [regex]::Match($content, 'APP_NAME\s*=\s*"([^"]+)"').Groups[1].Value
+          $appDesc = [regex]::Match($content, 'APP_DESC\s*=\s*"([^"]+)"').Groups[1].Value
+
+          @"
+          MAJOR = $major
+          MINOR = $minor
+          PATCH = $patch
+          BUILD = $build
+
+          VERSION = "$ver"
+          VERSION_SHORT = "$verShort"
+
+          APP_NAME = "$appName"
+          APP_DESC = "$appDesc"
+          "@ | Set-Content version.py -Encoding UTF8
+
+          @"
+          # UTF-8
+          VSVersionInfo(
+            ffi=FixedFileInfo(
+              filevers=($major, $minor, $patch, $build),
+              prodvers=($major, $minor, $patch, $build),
+              mask=0x3f,
+              flags=0x0,
+              OS=0x40004,
+              fileType=0x1,
+              subtype=0x0,
+              date=(0, 0)
+            ),
+            kids=[
+              StringFileInfo(
+                [
+                StringTable(
+                  u'040904B0',
+                  [StringStruct(u'CompanyName', u'Brent Gordon'),
+                  StringStruct(u'FileDescription', u'$appName - $appDesc'),
+                  StringStruct(u'FileVersion', u'$ver'),
+                  StringStruct(u'InternalName', u'FuseOBD'),
+                  StringStruct(u'LegalCopyright', u'Copyright (C) 2026 Brent Gordon - GPL-3.0-or-later'),
+                  StringStruct(u'OriginalFilename', u'FuseOBD.exe'),
+                  StringStruct(u'ProductName', u'$appName'),
+                  StringStruct(u'ProductVersion', u'$ver')])
+                ]),
+              VarFileInfo([VarStruct(u'Translation', [1033, 1200])])
+            ]
+          )
+          "@ | Set-Content version_info.txt -Encoding UTF8
+
+          "version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "tag=v$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Build with PyInstaller
+        shell: pwsh
+        run: |
+          python -m PyInstaller --clean --noconfirm fuse.spec
+          New-Item -ItemType Directory -Force -Path "dist/signing" | Out-Null
+          Move-Item "dist/FuseOBD.exe" "dist/signing/FuseOBD-v${{ steps.bump.outputs.version }}.exe"
+
+      - name: Azure login (OIDC federated)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign with Azure Artifact Signing
+        uses: azure/trusted-signing-action@v0.5.1
+        with:
+          endpoint: ${{ env.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ env.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ env.AZURE_ARTIFACT_SIGNING_CERT_PROFILE }}
+          files-folder: dist/signing
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Commit version bump
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add version.py version_info.txt
+          git commit -m "v${{ steps.bump.outputs.version }} - signed release"
+          git tag "${{ steps.bump.outputs.tag }}"
+          git push origin HEAD:${{ github.ref_name }}
+          git push origin "${{ steps.bump.outputs.tag }}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.bump.outputs.tag }}
+          name: FuseOBD ${{ steps.bump.outputs.tag }}
+          generate_release_notes: true
+          files: dist/signing/FuseOBD-v${{ steps.bump.outputs.version }}.exe

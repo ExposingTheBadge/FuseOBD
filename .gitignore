@@ -43,3 +43,6 @@ machine_id
 # Stray previews / scratch
 fuse-obd-icon-preview.png
 new */
+
+# Personal docs for Azure Artifact Signing setup (lease, ID, etc.)
+.azure-signing/
