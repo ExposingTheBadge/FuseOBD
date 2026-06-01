@@ -63,12 +63,16 @@ class VehicleConnection:
             self.ms_channel = None
 
     def get_uds_client(self, module: FordModule) -> UDSClient:
-        if module.address in self._uds_clients:
-            return self._uds_clients[module.address]
+        # Key by (network, address) — after FORScan-verified address corrections, RCM
+        # (HS-CAN @ 0x726) and BCM (MS-CAN @ 0x726) share the same lower byte. A plain
+        # address key collides between them.
+        key = (module.network, module.address)
+        if key in self._uds_clients:
+            return self._uds_clients[key]
         network = FORD_HS_CAN if module.network == FordNetwork.HS_CAN else FORD_MS_CAN
         client = UDSClient(self.j2534, network, module.tx_id, module.rx_id)
         client.connect()
-        self._uds_clients[module.address] = client
+        self._uds_clients[key] = client
         return client
 
     def scan_modules(self, callback=None) -> list[ModuleInfo]:
@@ -97,7 +101,7 @@ class VehicleConnection:
                     pass
                 found.append(info)
             except Exception:
-                client_to_remove = self._uds_clients.pop(module.address, None)
+                client_to_remove = self._uds_clients.pop((module.network, module.address), None)
                 if client_to_remove:
                     try:
                         client_to_remove.disconnect()
