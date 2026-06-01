@@ -366,6 +366,7 @@ class AuthDialog(QDialog):
             # a password-change dialog before we let them in.
             if account.must_change_password():
                 self._force_password_change()
+            self._wait_workers()
             self.accept()
         else:
             self.error.setText(message)
@@ -461,6 +462,7 @@ class AuthDialog(QDialog):
             self._end_google_flow(None)
             if account.must_change_password():
                 self._force_password_change()
+            self._wait_workers()
             self.accept()
             return
         if status == "error":
@@ -479,6 +481,31 @@ class AuthDialog(QDialog):
         if error_msg:
             self.error.setText(error_msg)
             self.error.setVisible(True)
+
+    # ── Worker thread teardown ──
+    def _wait_workers(self, ms: int = 3000):
+        # Each in-flight QThread must finish before this QDialog is
+        # destroyed; otherwise PyQt aborts the process with
+        # "QThread: Destroyed while thread is still running" — which is
+        # what was killing the app right after a successful Google
+        # sign-in (three workers running in parallel made the race
+        # easy to hit).
+        workers = (
+            getattr(self, "_worker", None),
+            getattr(self, "_google_probe", None),
+            getattr(self, "_google_begin_worker", None),
+            getattr(self, "_google_poll_worker", None),
+        )
+        for w in workers:
+            try:
+                if w is not None and w.isRunning():
+                    w.wait(ms)
+            except Exception:
+                pass
+
+    def closeEvent(self, ev):
+        self._wait_workers()
+        super().closeEvent(ev)
 
 
 def _field_label(text: str) -> QLabel:
