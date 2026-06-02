@@ -63,7 +63,7 @@ class VehicleConnection:
             self.ms_channel = None
 
     def get_uds_client(self, module: FordModule) -> UDSClient:
-        # Key by (network, address) — after FORScan-verified address corrections, RCM
+        # Key by (network, address) — after the verified address corrections, RCM
         # (HS-CAN @ 0x726) and BCM (MS-CAN @ 0x726) share the same lower byte. A plain
         # address key collides between them.
         key = (module.network, module.address)

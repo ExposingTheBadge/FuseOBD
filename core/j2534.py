@@ -513,7 +513,7 @@ def _parse_voltage(resp: str) -> float:
 
     Tolerates leading garbage from clone adapters by scanning for the
     first decimal number rather than calling float() on the whole string.
-    Mirrors FORScan's parser in FUN_0054e8c0.
+    Mirrors the parser at FUN_0054e8c0 in the diagnostic-reference binary.
     """
     if not resp:
         return 0.0
@@ -1128,7 +1128,8 @@ class J2534:
     def connect(self, protocol: Protocol, flags: int = 0, baudrate: int = 500000) -> int:
         if self._is_serial or self._is_wifi:
             # ELM327 can only do one CAN speed at a time — switch if needed.
-            # Sequences mirror FORScan (FUN_0054f650 / FUN_00549830).
+            # Sequences mirror the diagnostic-reference binary
+            # (FUN_0054f650 / FUN_00549830).
             current_baud = getattr(self, '_current_can_baud', None)
             if current_baud != baudrate:
                 if baudrate == 500000:
@@ -1193,7 +1194,7 @@ class J2534:
                 if ch["can_11bit"]:
                     tx_id &= 0x7FF
                 ch["tx_id"] = tx_id
-            # Set CAN headers on adapter (mirrors FORScan FUN_005490f0):
+            # Set CAN headers on adapter (mirrors diag-reference FUN_005490f0):
             #   ATSHxxxxxx  — 3-byte tx header (11-bit) or 4-byte (29-bit)
             #   ATCRAxxx    — explicit receive address filter
             # Cache last-set values to skip redundant re-sends.
@@ -1419,8 +1420,8 @@ class J2534:
         return "\n".join(lines).strip()
 
     def _elm_init(self, stream):
-        """Initialize the adapter with the same sequence FORScan uses
-        (decompiled from FUN_0054f190 / FUN_005491f0). The wide 0x7xx
+        """Initialize the adapter with the same sequence the diag-reference
+        binary uses (decompiled FUN_0054f190 / FUN_005491f0). The wide 0x7xx
         receive filter is the part that lets all Ford modules through —
         without it the ELM only passes whatever auto-receive guessed.
         """
@@ -1439,7 +1440,7 @@ class J2534:
             "ATSP6",       # ISO 15765-4 11-bit 500k (HS-CAN)
             "ATAT1",       # Adaptive timing mode 1
             "ATSTFF",      # Max response timeout
-            "ATTA30",      # Tester address = 0x30 (FORScan default)
+            "ATTA30",      # Tester address = 0x30 (diag-reference default)
             "ATCF700",     # CAN filter base = 0x700
             "ATCMF00",     # CAN mask = 0xF00  — together: pass 0x700-0x7FF
         ):

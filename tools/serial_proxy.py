@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-ELM327 Serial Proxy — intercepts FORScan ↔ ELM327 communication
+ELM327 Serial Proxy — intercepts client ↔ ELM327 communication
 
 Connects to the REAL ELM327 on one COM port, creates a relay through a
-virtual COM port pair (com0com), and logs every byte FORScan sends/receives.
+virtual COM port pair (com0com), and logs every byte the client app
+sends/receives. Useful for capturing how any Windows diag tool drives
+the adapter so we can mirror its sequence in Fuse OBD.
 
 SETUP (do once):
   1. Download & install com0com from: https://sourceforge.net/projects/com0com/
@@ -11,7 +13,8 @@ SETUP (do once):
   3. Create a virtual pair:  install PortName=COM10 PortName=COM11
   4. Enable Ports class:      change CNCA0 PortName=COM10 EmuBR=yes AddRT=yes
                               change CNCB0 PortName=COM11 EmuBR=yes AddRT=yes
-  5. FORScan connects to COM11, this script connects to COM10 + real ELM327
+  5. The client app connects to COM11, this script connects to COM10
+     + the real ELM327 on the user-supplied port.
 
 USAGE:
   python serial_proxy.py <REAL_ELM_PORT> <VIRTUAL_PORT> [baud]
@@ -33,7 +36,7 @@ BAUD = int(sys.argv[3]) if len(sys.argv) > 3 else 500000
 LOG_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ── Logging ──────────────────────────────────────────────────────────
-logfile = os.path.join(LOG_DIR, f"forscan_proxy_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+logfile = os.path.join(LOG_DIR, f"elm_proxy_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
 
 def log(direction: str, raw: bytes):
     """Log raw bytes with direction, timestamp, hex, and ASCII."""
@@ -105,7 +108,7 @@ def relay(src: serial.Serial, dst: serial.Serial, label: str):
 def main():
     log_info(f"ELM327 Serial Proxy starting...")
     log_info(f"  Real ELM327: {REAL_PORT}")
-    log_info(f"  Virtual port: {VIRTUAL_PORT}  →  FORScan connects to paired port")
+    log_info(f"  Virtual port: {VIRTUAL_PORT}  →  client app connects to paired port")
     log_info(f"  Baud: {BAUD}")
     log_info(f"  Log: {logfile}")
 
@@ -119,7 +122,7 @@ def main():
         log_info("  Is the ELM327 plugged in? Is another program using it?")
         sys.exit(1)
 
-    # Open virtual port (connected to FORScan via com0com pair)
+    # Open virtual port (connected to the client app via com0com pair)
     log_info(f"Opening {VIRTUAL_PORT}...")
     try:
         fwd = serial.Serial(VIRTUAL_PORT, BAUD, timeout=0.1)
@@ -131,12 +134,12 @@ def main():
         elm.close()
         sys.exit(1)
 
-    log_info("Relay active — waiting for FORScan traffic...")
+    log_info("Relay active — waiting for client traffic...")
     log_info("(Press Ctrl+C to stop)")
 
     # Start relay threads
-    t1 = threading.Thread(target=relay, args=(elm, fwd, "FORScan  → ELM"), daemon=True)
-    t2 = threading.Thread(target=relay, args=(fwd, elm, "ELM     → FORScan"), daemon=True)
+    t1 = threading.Thread(target=relay, args=(elm, fwd, "client  → ELM"), daemon=True)
+    t2 = threading.Thread(target=relay, args=(fwd, elm, "ELM     → client"), daemon=True)
     t1.start()
     t2.start()
 

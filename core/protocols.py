@@ -64,8 +64,8 @@ class FordModule:
     address: int        # lower byte of tx CAN ID (tx_id = 0x700 + address for all 11-bit Ford diag)
     network: FordNetwork
     description: str = ""
-    verified: bool = False  # True iff this address/network is confirmed against the FORScan
-                            # decompilation reference (D:\APP\forscan_analysis, served at :3015).
+    verified: bool = False  # True iff this address/network is confirmed against the
+                            # external Ford-diagnostic reverse-engineering reference.
                             # Unverified entries are best-effort and may not respond on real vehicles.
 
     @property
@@ -77,11 +77,11 @@ class FordModule:
         return 0x700 + self.address + 8
 
 
-# Module table — values marked `verified=True` are cross-referenced against the FORScan
-# decompilation analysis (ANALYSIS_03_CAR_MODEL_PLATFORM_DICTIONARY.md). Several previous
-# addresses were wrong by enough that scan_modules() was silently skipping the module on
-# real vehicles (no response → exception → except: continue). FORScan's index is partial,
-# so absence-from-FORScan ≠ wrong-in-FuseOBD; unverified entries are kept as-is.
+# Module table — values marked `verified=True` are cross-referenced against an
+# external Ford-diagnostic reverse-engineering reference. Several previous addresses
+# were wrong by enough that scan_modules() was silently skipping the module on real
+# vehicles (no response → exception → except: continue). That reference's index is
+# partial, so absence-from-reference ≠ wrong-here; unverified entries are kept as-is.
 FORD_MODULES = [
     # ── Powertrain (HS-CAN, standard OBD2-aligned addressing) ──
     FordModule("Powertrain Control Module", "PCM", 0xE0, FordNetwork.HS_CAN, verified=True),
@@ -92,11 +92,11 @@ FORD_MODULES = [
     FordModule("Restraint Control Module", "RCM", 0x26, FordNetwork.HS_CAN, verified=True),
     FordModule("Power Steering Control Module", "PSCM", 0x30, FordNetwork.HS_CAN, verified=True),
     # EPAS is the same physical role as PSCM on later platforms but addressed separately on
-    # older ones — FORScan only confirms PSCM @ 0x730 directly. Leave EPAS unverified.
+    # older ones — only PSCM @ 0x730 is verified directly. Leave EPAS unverified.
     FordModule("Electric Power Steering", "EPAS", 0x62, FordNetwork.HS_CAN),
 
     # ── Body / convenience (mostly MS-CAN) ──
-    # IPC and RCM both live at 0x726/0x720 but on different networks — verified by FORScan.
+    # IPC and RCM both live at 0x726/0x720 but on different networks (verified).
     FordModule("Instrument Panel Cluster", "IPC", 0x20, FordNetwork.MS_CAN, verified=True),
     FordModule("Body Control Module", "BCM", 0x26, FordNetwork.MS_CAN, verified=True),
     FordModule("Steering Column Control Module", "SCCM", 0x24, FordNetwork.MS_CAN, verified=True),
@@ -112,7 +112,7 @@ FORD_MODULES = [
     FordModule("Gateway Module A", "GWM", 0x60, FordNetwork.HS_CAN, verified=True),
 
     # ── SYNC / infotainment ──
-    # FORScan-verified: APIM is on HS-CAN at 0x7C0, NOT MS-CAN at 0x773 as previously listed.
+    # Verified: APIM is on HS-CAN at 0x7C0, NOT MS-CAN at 0x773 as previously listed.
     FordModule("SYNC / APIM", "APIM", 0xC0, FordNetwork.HS_CAN, verified=True),
 
     # ── Unverified entries (kept as-is, may or may not be correct per platform) ──

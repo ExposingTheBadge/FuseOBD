@@ -30,7 +30,10 @@ class ModuleAsBuilt:
             lines.append(f"DID {block.did:04X}: {block.hex_str}")
         return "\n".join(lines)
 
-    def to_forscan_format(self) -> str:
+    def to_asbuilt_text(self) -> str:
+        """Serialize to the standard Ford .ab As-Built text format: a
+        commented module header, then ``<DID>: AA-BB-CC`` lines with
+        dash-separated 3-byte groups."""
         lines = [f"; {self.module_name} ({self.module_abbrev})"]
         for block in self.blocks:
             parts = []
@@ -119,7 +122,7 @@ class AsBuiltReader:
     def export_profile(modules: list[ModuleAsBuilt]) -> str:
         lines = ["; FUSE As-Built Profile", ";"]
         for mod in modules:
-            lines.append(mod.to_forscan_format())
+            lines.append(mod.to_asbuilt_text())
             lines.append("")
         return "\n".join(lines)
 

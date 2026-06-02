@@ -530,7 +530,7 @@ class AIToolBridge:
             out.append({
                 "module": getattr(m, "module_abbrev", "?"),
                 "block_count": len(getattr(m, "blocks", []) or []),
-                "forscan": getattr(m, "to_forscan_format", lambda: "")(),
+                "asbuilt_text": getattr(m, "to_asbuilt_text", lambda: "")(),
             })
         return {"status": "ok", "modules": out}
 

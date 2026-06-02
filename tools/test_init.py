@@ -93,7 +93,7 @@ HS_PER_MODULE = [
     "ATCRA7E8",     # rx filter
 ]
 
-# MS-CAN switch sequence (FORScan FUN_0054f650)
+# MS-CAN switch sequence (diag-reference FUN_0054f650)
 MS_SWITCH = [
     "ATPP2ASV38",
     "ATPP2AON",
@@ -169,7 +169,7 @@ def main():
         section("Summary")
         all_bad = bad_init + bad_hs + bad_ms + bad_ms_pm
         if not all_bad:
-            print("  All commands accepted. Adapter init matches FORScan sequence.")
+            print("  All commands accepted. Adapter init matches reference sequence.")
         else:
             print(f"  {len(all_bad)} command(s) rejected:")
             for c, r in all_bad:

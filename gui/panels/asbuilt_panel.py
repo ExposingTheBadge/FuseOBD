@@ -94,7 +94,7 @@ class AsBuiltPanel(BasePanel):
     def _on_module_select(self, idx: int):
         if 0 <= idx < len(self.asbuilt_data):
             mod = self.asbuilt_data[idx]
-            self.data_text.setPlainText(mod.to_forscan_format())
+            self.data_text.setPlainText(mod.to_asbuilt_text())
 
     def _export(self):
         if not self.asbuilt_data:
