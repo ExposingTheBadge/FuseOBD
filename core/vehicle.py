@@ -12,6 +12,11 @@ from core.ford_dids import (
     DID_FORD_SOFTWARE_PART_NUMBER,
     DID_FORD_CALIBRATION_ID,
     DID_FORD_ASSEMBLY_PART_NUMBER,
+    DID_FORD_VEHICLE_MARK_1,
+    DID_FORD_VEHICLE_MARK_2,
+    DID_FORD_VEHICLE_MARK_3,
+    DID_FORD_VEHICLE_MARK_4,
+    DID_FORD_VEHICLE_CONFIGURATION,
 )
 
 
@@ -208,3 +213,42 @@ class VehicleConnection:
         v = self.j2534.read_battery_voltage()
         self.vehicle_info.battery_voltage = v
         return v
+
+    def read_vehicle_markers(self) -> dict:
+        """Read the five Ford PCM vehicle-marker DIDs (D102, D103, D107,
+        D109, D128). These return single-byte platform/configuration
+        markers — NOT the ASCII VIN — that the manufacturer uses to
+        encode model/option codes. The decoded meaning is platform-
+        dependent; surface as raw hex so the AI / report layer can
+        cross-reference against per-model lookup tables later.
+
+        Returns {} if PCM doesn't respond. Keys are the DID names from
+        core.ford_dids (mark_1..mark_4 + configuration); values are
+        hex strings.
+        """
+        pcm = next((m for m in FORD_MODULES if m.abbreviation == "PCM"), None)
+        if pcm is None:
+            return {}
+        out: dict[str, str] = {}
+        try:
+            client = self.get_uds_client(pcm)
+            try:
+                client.diagnostic_session(UDSSession.EXTENDED)
+            except Exception:
+                pass
+            for did, key in (
+                (DID_FORD_VEHICLE_MARK_1,        "mark_1"),
+                (DID_FORD_VEHICLE_MARK_2,        "mark_2"),
+                (DID_FORD_VEHICLE_MARK_3,        "mark_3"),
+                (DID_FORD_VEHICLE_MARK_4,        "mark_4"),
+                (DID_FORD_VEHICLE_CONFIGURATION, "configuration"),
+            ):
+                try:
+                    data = client.read_data_by_id(did)
+                    if data:
+                        out[key] = data.hex().upper()
+                except (UDSException, TimeoutError):
+                    continue
+        except Exception:
+            return out
+        return out
