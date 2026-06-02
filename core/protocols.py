@@ -82,6 +82,15 @@ class FordModule:
 # were wrong by enough that scan_modules() was silently skipping the module on real
 # vehicles (no response → exception → except: continue). That reference's index is
 # partial, so absence-from-reference ≠ wrong-here; unverified entries are kept as-is.
+#
+# OBSERVED-BUT-UNIDENTIFIED CAN IDs (from FUN_0068f1b0 ID-equivalence routing):
+#   short 0x32 ↔ full 0x797   — possibly HVAC alternate address on older platforms
+#   short 0x7C4 ↔ full 0x7C6  — possibly FCIM RX address (would imply rx ≠ tx + 8)
+#   short 0x790 ↔ full 0x7B0  — paired pair, module unidentified
+#   addr 0x791               — appears with "REWRITE_TRM" service-routine string,
+#                              module unidentified (TRM = Transmission/Tire/Trip module?)
+# These need real-vehicle probing or additional source evidence before becoming
+# FORD_MODULES entries.
 FORD_MODULES = [
     # ── Powertrain (HS-CAN, standard OBD2-aligned addressing) ──
     FordModule("Powertrain Control Module", "PCM", 0xE0, FordNetwork.HS_CAN, verified=True),
