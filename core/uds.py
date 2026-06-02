@@ -73,6 +73,15 @@ class UDSException(Exception):
         super().__init__(f"Negative response to {svc_name}: {nrc_name}")
 
 
+# Ford / J2534 ISO-TP constants observed in an external Ford-diagnostic
+# reverse-engineering reference. The 3001ms upper bound matches the
+# MAX_RESPONSE_TIME setting Ford's tool uses — long enough for slow ECU
+# operations (BCM config writes, TCM programming sessions) without
+# false-timing-out a healthy bus.
+DEFAULT_REQUEST_TIMEOUT_MS = 3001
+ISO_TP_BLOCK_SIZE_FRAMES   = 200    # max consecutive frames between flow-control
+
+
 class UDSClient:
     def __init__(self, j2534: J2534, network: NetworkConfig, tx_id: int, rx_id: int):
         self.j2534 = j2534
@@ -82,7 +91,7 @@ class UDSClient:
         self.channel_id: Optional[int] = None
         self.filter_id: Optional[int] = None
         self.tester_present_id: Optional[int] = None
-        self.timeout = 2000
+        self.timeout = DEFAULT_REQUEST_TIMEOUT_MS
 
     def connect(self):
         self.channel_id = self.j2534.connect(
