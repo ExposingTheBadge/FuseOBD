@@ -4,8 +4,18 @@ from PyQt6.QtWidgets import (
     QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
+from core.protocols import FordNetwork
 from core.vehicle import ModuleInfo
 from gui.qt_helpers import BasePanel, run_thread
+
+
+_NETWORK_LABEL = {
+    FordNetwork.HS_CAN:     "HS CAN",
+    FordNetwork.MS_CAN:     "MS CAN",
+    FordNetwork.HS_CAN_EXT: "HS CAN 29",
+    FordNetwork.ISO:        "ISO9141",
+    FordNetwork.SCP:        "SCP",
+}
 
 
 class ScannerPanel(BasePanel):
@@ -38,9 +48,12 @@ class ScannerPanel(BasePanel):
         v.addWidget(self.status_label)
 
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Module", "Name", "Address", "Network", "Part Number", "Software", "Hardware"])
+        self.tree.setHeaderLabels([
+            "Module", "Name", "CAN ID", "Network",
+            "Part Number", "Software", "Cal ID", "Assembly", "Hardware",
+        ])
         self.tree.setAlternatingRowColors(True)
-        for col, w in enumerate([60, 220, 70, 80, 140, 140, 140]):
+        for col, w in enumerate([60, 220, 70, 80, 130, 140, 90, 90, 130]):
             self.tree.setColumnWidth(col, w)
         self.tree.setUniformRowHeights(True)
         v.addWidget(self.tree, stretch=1)
@@ -80,14 +93,15 @@ class ScannerPanel(BasePanel):
     def _populate_results(self, modules: list[ModuleInfo]):
         self.tree.clear()
         for m in modules:
-            network = "HS CAN" if m.module.network.value <= 2 else "MS CAN"
             item = QTreeWidgetItem([
                 m.module.abbreviation,
                 m.module.name,
-                f"0x{m.module.address:02X}",
-                network,
+                f"0x{m.module.tx_id:03X}",          # tx CAN ID — what users see on the bus
+                _NETWORK_LABEL.get(m.module.network, "?"),
                 m.part_number or "--",
                 m.software_pn or "--",
+                m.calibration_id or "--",
+                m.assembly_pn or "--",
                 m.hardware_pn or "--",
             ])
             for col in (0, 2, 3):

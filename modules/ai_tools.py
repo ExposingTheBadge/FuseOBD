@@ -73,8 +73,12 @@ READ_ONLY_TOOLS: list[dict] = [
         "name": "scan_modules",
         "description": (
             "Scan every Ford ECU on the bus and report which ones answer, "
-            "what protocol they use, and any module-level metadata. "
-            "Populates the Scanner tab in the main window. "
+            "what protocol they use, and module-level metadata: ISO part "
+            "number (0xF187), software P/N (ISO 0xF188 or Ford 0xE217 hex), "
+            "calibration ID (Ford 0xE219 hex), assembly P/N (Ford 0xE21A "
+            "ASCII, e.g. WM5F), and hardware P/N (0xF191). Each module "
+            "result also has tx_id/rx_id CAN identifiers and network "
+            "(HS_CAN / MS_CAN / HS_CAN_EXT). Populates the Scanner tab. "
             "Set `quick=true` to only scan a known short list."
         ),
         "input_schema": {
@@ -386,13 +390,23 @@ class AIToolBridge:
 
         out_modules = []
         for m in result.modules:
-            out_modules.append({
-                "abbreviation": getattr(m, "abbreviation", "?"),
-                "name": getattr(m, "name", "?"),
-                "address": getattr(m, "address", None),
-                "protocol": getattr(m, "protocol", None),
-                "responding": getattr(m, "responding", True),
-            })
+            mod = getattr(m, "module", None)
+            net = getattr(getattr(mod, "network", None), "name", None) if mod else None
+            entry = {
+                "abbreviation":   getattr(mod, "abbreviation", "?") if mod else "?",
+                "name":           getattr(mod, "name", "?") if mod else "?",
+                "tx_id":          (f"0x{mod.tx_id:03X}" if mod else None),
+                "rx_id":          (f"0x{mod.rx_id:03X}" if mod else None),
+                "network":        net,
+                "responding":     getattr(m, "present", True),
+                "part_number":    getattr(m, "part_number", "") or None,
+                "software_pn":    getattr(m, "software_pn", "") or None,
+                "calibration_id": getattr(m, "calibration_id", "") or None,
+                "assembly_pn":    getattr(m, "assembly_pn", "") or None,
+                "hardware_pn":    getattr(m, "hardware_pn", "") or None,
+            }
+            # Drop empty/None keys so the AI prompt stays compact.
+            out_modules.append({k: v for k, v in entry.items() if v is not None})
         return {
             "status": "ok",
             "total": result.total_modules,
