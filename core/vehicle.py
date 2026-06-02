@@ -8,6 +8,11 @@ from core.protocols import (
     FORD_HS_CAN, FORD_MS_CAN, FORD_BRANDS,
 )
 from core.uds import UDSClient, UDSSession, UDSException, NRC
+from core.ford_dids import (
+    DID_FORD_SOFTWARE_PART_NUMBER,
+    DID_FORD_CALIBRATION_ID,
+    DID_FORD_ASSEMBLY_PART_NUMBER,
+)
 
 
 @dataclass
@@ -17,6 +22,8 @@ class ModuleInfo:
     part_number: str = ""
     hardware_pn: str = ""
     software_pn: str = ""
+    calibration_id: str = ""     # Ford DID 0xE219
+    assembly_pn: str = ""        # Ford DID 0xE21A (ASCII, e.g. "WM5F")
     vin: str = ""
     raw_data: dict = field(default_factory=dict)
 
@@ -84,21 +91,42 @@ class VehicleConnection:
                 client = self.get_uds_client(module)
                 client.diagnostic_session(UDSSession.FORD_DIAG)
                 info = ModuleInfo(module=module, present=True)
+
+                # ISO 14229 standard ident DIDs — empty on most Ford modules
+                # but populated on standards-compliant ones (SYNC4/Sync 3+).
+                for did, attr in (
+                    (0xF188, "software_pn"),
+                    (0xF191, "hardware_pn"),
+                    (0xF187, "part_number"),
+                ):
+                    try:
+                        data = client.read_data_by_id(did)
+                        setattr(info, attr, data.decode("ascii", errors="replace").strip())
+                    except (UDSException, TimeoutError):
+                        pass
+
+                # Ford-specific ident DIDs — preferred on PCM and most Ford
+                # body modules. Only overwrite the ISO fields if they were
+                # empty (don't clobber genuine standards-compliant data).
                 try:
-                    data = client.read_data_by_id(0xF188)
-                    info.software_pn = data.decode("ascii", errors="replace").strip()
+                    data = client.read_data_by_id(DID_FORD_SOFTWARE_PART_NUMBER)
+                    if data and not info.software_pn:
+                        info.software_pn = data.hex().upper()
                 except (UDSException, TimeoutError):
                     pass
                 try:
-                    data = client.read_data_by_id(0xF191)
-                    info.hardware_pn = data.decode("ascii", errors="replace").strip()
+                    data = client.read_data_by_id(DID_FORD_CALIBRATION_ID)
+                    if data:
+                        info.calibration_id = data.hex().upper()
                 except (UDSException, TimeoutError):
                     pass
                 try:
-                    data = client.read_data_by_id(0xF187)
-                    info.part_number = data.decode("ascii", errors="replace").strip()
+                    data = client.read_data_by_id(DID_FORD_ASSEMBLY_PART_NUMBER)
+                    if data:
+                        info.assembly_pn = data.decode("ascii", errors="replace").strip("\x00").strip()
                 except (UDSException, TimeoutError):
                     pass
+
                 found.append(info)
             except Exception:
                 client_to_remove = self._uds_clients.pop((module.network, module.address), None)
