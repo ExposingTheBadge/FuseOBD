@@ -117,7 +117,7 @@ FORD_MODULES = [
 
     # ── Unverified entries (kept as-is, may or may not be correct per platform) ──
     FordModule("Heating Ventilation AC", "HVAC", 0x33, FordNetwork.MS_CAN),
-    FordModule("Parking Aid Module", "PAM", 0x36, FordNetwork.MS_CAN),
+    FordModule("Parking Aid Module", "PAM", 0x36, FordNetwork.MS_CAN, verified=True),
     FordModule("Rear Left Door Module", "RLDM", 0x42, FordNetwork.MS_CAN),
     FordModule("Rear Right Door Module", "RRDM", 0x43, FordNetwork.MS_CAN),
     FordModule("Trailer Brake Control Module", "TBC", 0x17, FordNetwork.HS_CAN),
