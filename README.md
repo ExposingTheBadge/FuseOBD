@@ -42,6 +42,49 @@ python build.py
 
 Output: `dist/FuseOBD-v{VERSION}.exe`
 
+## Zig Native Layer (Planned)
+
+The J2534 / UDS / CAN bus core is being migrated from Python ctypes to a **Zig-compiled native DLL** (`fuse_j2534.dll`). The Python GUI and AI Mechanic remain unchanged — only the hardware interface layer moves to Zig.
+
+### Why
+
+The current [core/j2534.py](core/j2534.py) is ~1,500 lines of `ctypes.Structure`, `c_ulong`, `POINTER`, and `byref` calls — essentially writing C through Python's FFI. This works, but has real costs:
+
+- **Timing:** Python's garbage collector can pause mid-transaction. On a CAN bus doing UDS SecurityAccess with tight P2/P2* windows, a GC pause causes `BUSY_REPEAT` or timeout failures.
+- **Safety:** ctypes offers zero compile-time guarantees about struct layouts, pointer validity, or buffer sizes. A wrong `c_ulong` vs `c_ushort` silently corrupts data.
+- **Overhead:** Every J2534 call crosses the Python → C boundary via ctypes marshalling.
+
+### Architecture
+
+```
+┌─────────────────────────┐
+│   PyQt6 GUI (Python)    │  ← unchanged
+├─────────────────────────┤
+│   ctypes → fuse_j2534   │  ← thin bridge (much simpler than current)
+├─────────────────────────┤
+│   Zig J2534/UDS/CAN     │  ← NEW: compile-time safe, deterministic timing
+├─────────────────────────┤
+│   Vendor J2534 DLL      │  ← hardware adapter (Tactrix, VCM2, VXDIAG, etc.)
+└─────────────────────────┘
+```
+
+### What Zig provides
+
+- **Direct C ABI calls** to vendor J2534 DLLs — no ctypes marshalling overhead
+- **Compile-time validated struct layouts** — `PASSTHRU_MSG`, `SCONFIG_LIST`, etc. are verified at build time
+- **No GC** — deterministic timing for CAN bus operations, P1/P2 timing parameters respected precisely
+- **Bounds-checked slices** — buffer overflows caught at runtime instead of silently corrupting memory
+- **Single-command cross-compilation** — build x86 and x86_64 Windows targets from any platform
+
+### Status
+
+🔲 Scaffold `zig/` project with `build.zig`
+🔲 Port J2534 protocol enums and struct definitions
+🔲 Port `PassThruOpen` / `Connect` / `ReadMsgs` / `WriteMsgs` / `Disconnect` / `Close`
+🔲 Port UDS session management and DTC reading
+🔲 Python ctypes bridge to new DLL
+🔲 Integration tests against real hardware
+
 ## License
 
 GNU General Public License v3.0 or later — see [LICENSE](LICENSE).
