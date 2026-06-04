@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
 )
 
 from modules import issues_log
+from gui.panels.can_decode import annotate_tx_rx
 
 
 _TAG_COLOR = {
@@ -191,6 +192,19 @@ class BusMonitorPanel(QWidget):
             f"<span style='color:{color}; font-weight:bold;'>[{tag:<4}]</span> "
             f"<span style='color:#d8d8d8;'>{_esc(message)}</span>"
         )
+        # TX/RX/PROT lines get a dim trailing annotation describing the UDS
+        # service / OBD mode / ELM AT command being sent. Annotation is a
+        # best-effort decode and silently returns '' for opaque frames.
+        if tag in ("TX", "RX", "PROT"):
+            try:
+                ann = annotate_tx_rx(tag, message)
+            except Exception:
+                ann = ""
+            if ann:
+                line += (
+                    f"<br/><span style='color:#666;'>{'':<14}</span>"
+                    f"<span style='color:#7c8aa8; font-style:italic;'>↪ {_esc(ann)}</span>"
+                )
         self.view.appendHtml(line)
         if self.autoscroll_cb.isChecked():
             self.view.moveCursor(QTextCursor.MoveOperation.End)
