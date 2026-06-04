@@ -47,6 +47,31 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      - name: Install Zig 0.16.0
+        shell: pwsh
+        run: |
+          $ver = "0.16.0"
+          $url = "https://ziglang.org/download/$ver/zig-x86_64-windows-$ver.zip"
+          $zip = "$env:RUNNER_TEMP/zig.zip"
+          $dest = "$env:RUNNER_TEMP/zig"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $dest -Force
+          $zigDir = (Get-ChildItem -Directory $dest | Select-Object -First 1).FullName
+          "$zigDir" | Out-File -FilePath $env:GITHUB_PATH -Append
+          & "$zigDir/zig.exe" version
+
+      - name: Build Zig native J2534 layer
+        shell: pwsh
+        run: |
+          Push-Location zig
+          zig build -Dtarget=x86_64-windows --release=safe
+          Pop-Location
+          if (-not (Test-Path "zig/zig-out/bin/fuse_j2534.dll")) {
+            Write-Error "Zig build did not produce fuse_j2534.dll"
+            exit 1
+          }
+          Get-Item zig/zig-out/bin/fuse_j2534.dll | Format-Table Name, Length
+
       - name: Bump version
         id: bump
         shell: pwsh
