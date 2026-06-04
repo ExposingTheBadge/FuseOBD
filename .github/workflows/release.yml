@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       bump:
-        description: "Version part to bump"
+        description: "Version part to bump (ignored when dry_run=true)"
         required: true
         default: "minor"
         type: choice
@@ -13,6 +13,11 @@ on:
           - minor
           - patch
           - build
+      dry_run:
+        description: "Sign-only test: build + sign current version, no bump/commit/tag/release"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -77,17 +82,22 @@ jobs:
         shell: pwsh
         run: |
           $bump = "${{ github.event.inputs.bump }}"
+          $dryRun = "${{ github.event.inputs.dry_run }}" -eq "true"
           $content = Get-Content version.py -Raw
           $major = [int]([regex]::Match($content, 'MAJOR\s*=\s*(\d+)').Groups[1].Value)
           $minor = [int]([regex]::Match($content, 'MINOR\s*=\s*(\d+)').Groups[1].Value)
           $patch = [int]([regex]::Match($content, 'PATCH\s*=\s*(\d+)').Groups[1].Value)
           $build = [int]([regex]::Match($content, 'BUILD\s*=\s*(\d+)').Groups[1].Value)
 
-          switch ($bump) {
-            "major" { $major++; $minor = 0; $patch = 0; $build = 0 }
-            "minor" { $minor++; $patch = 0; $build = 0 }
-            "patch" { $patch++; $build = 0 }
-            "build" { $build++ }
+          if (-not $dryRun) {
+            switch ($bump) {
+              "major" { $major++; $minor = 0; $patch = 0; $build = 0 }
+              "minor" { $minor++; $patch = 0; $build = 0 }
+              "patch" { $patch++; $build = 0 }
+              "build" { $build++ }
+            }
+          } else {
+            Write-Host "DRY RUN: keeping current version $major.$minor.$patch.$build (no bump, no commit, no release)"
           }
 
           $ver = "$major.$minor.$patch.$build"
@@ -96,18 +106,20 @@ jobs:
           $appName = [regex]::Match($content, 'APP_NAME\s*=\s*"([^"]+)"').Groups[1].Value
           $appDesc = [regex]::Match($content, 'APP_DESC\s*=\s*"([^"]+)"').Groups[1].Value
 
-          @"
-          MAJOR = $major
-          MINOR = $minor
-          PATCH = $patch
-          BUILD = $build
+          if (-not $dryRun) {
+            @"
+            MAJOR = $major
+            MINOR = $minor
+            PATCH = $patch
+            BUILD = $build
 
-          VERSION = "$ver"
-          VERSION_SHORT = "$verShort"
+            VERSION = "$ver"
+            VERSION_SHORT = "$verShort"
 
-          APP_NAME = "$appName"
-          APP_DESC = "$appDesc"
-          "@ | Set-Content version.py -Encoding UTF8
+            APP_NAME = "$appName"
+            APP_DESC = "$appDesc"
+            "@ | Set-Content version.py -Encoding UTF8
+          }
 
           @"
           # UTF-8
@@ -170,7 +182,17 @@ jobs:
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
 
+      - name: Upload signed artifact (dry-run)
+        if: github.event.inputs.dry_run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: FuseOBD-signed-dryrun-v${{ steps.bump.outputs.version }}
+          path: dist/signing/FuseOBD-v${{ steps.bump.outputs.version }}.exe
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Commit version bump
+        if: github.event.inputs.dry_run != 'true'
         shell: pwsh
         run: |
           git config user.name "github-actions[bot]"
@@ -182,6 +204,7 @@ jobs:
           git push origin "${{ steps.bump.outputs.tag }}"
 
       - name: Build release notes
+        if: github.event.inputs.dry_run != 'true'
         id: notes
         shell: pwsh
         run: |
@@ -220,6 +243,7 @@ jobs:
           $delim | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Create GitHub Release
+        if: github.event.inputs.dry_run != 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.bump.outputs.tag }}
