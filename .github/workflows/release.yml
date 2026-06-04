@@ -127,11 +127,11 @@ jobs:
                 [
                 StringTable(
                   u'040904B0',
-                  [StringStruct(u'CompanyName', u'Brent Gordon'),
+                  [StringStruct(u'CompanyName', u'FuseOBD'),
                   StringStruct(u'FileDescription', u'$appName - $appDesc'),
                   StringStruct(u'FileVersion', u'$ver'),
                   StringStruct(u'InternalName', u'FuseOBD'),
-                  StringStruct(u'LegalCopyright', u'Copyright (C) 2026 Brent Gordon - GPL-3.0-or-later'),
+                  StringStruct(u'LegalCopyright', u'Copyright (C) 2026 FuseOBD - GPL-3.0-or-later'),
                   StringStruct(u'OriginalFilename', u'FuseOBD.exe'),
                   StringStruct(u'ProductName', u'$appName'),
                   StringStruct(u'ProductVersion', u'$ver')])
@@ -206,7 +206,7 @@ jobs:
           $commits
 
           ### Install
-          Download ``FuseOBD-${tag}.exe`` below and run it. Binaries are Authenticode-signed; Windows will show **Verified publisher: Brent Gordon**.
+          Download ``FuseOBD-${tag}.exe`` below and run it. Binaries are Authenticode-signed; Windows will show **Verified publisher: FuseOBD**.
 
           "@
 
