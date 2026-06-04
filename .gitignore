@@ -6,6 +6,13 @@ __pycache__/
 *.pyo
 *.pyd
 
+# Zig build artifacts
+zig/.zig-cache/
+zig/zig-out/
+
+# Stray local caches (Antigravity / AI tooling project tracker, etc.)
+cache/
+
 # IDE / editor
 .claude/
 .vscode/
