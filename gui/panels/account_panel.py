@@ -553,6 +553,16 @@ class AccountPanel(QWidget):
         self._paint_pricing()
 
     def _paint_pricing(self):
+        # Admins and Pro users never see purchase/subscribe controls,
+        # even after the async billing config arrives.
+        u = account.current_user() or {}
+        if bool(u.get("is_admin")) or u.get("tier") == "pro":
+            self.upgrade_btn.setVisible(False)
+            self.paypal_btn.setVisible(False)
+            self.interval_box.setVisible(False)
+            self.price_caption.setVisible(False)
+            return
+
         plans = self._plans()
         currency = plans.get("currency", "usd")
         monthly = plans.get("monthly", {}) or {}
