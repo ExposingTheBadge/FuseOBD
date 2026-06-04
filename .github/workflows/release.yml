@@ -106,19 +106,21 @@ jobs:
           $appName = [regex]::Match($content, 'APP_NAME\s*=\s*"([^"]+)"').Groups[1].Value
           $appDesc = [regex]::Match($content, 'APP_DESC\s*=\s*"([^"]+)"').Groups[1].Value
 
+          $verPyContent = @"
+          MAJOR = $major
+          MINOR = $minor
+          PATCH = $patch
+          BUILD = $build
+
+          VERSION = "$ver"
+          VERSION_SHORT = "$verShort"
+
+          APP_NAME = "$appName"
+          APP_DESC = "$appDesc"
+          "@
+
           if (-not $dryRun) {
-            @"
-            MAJOR = $major
-            MINOR = $minor
-            PATCH = $patch
-            BUILD = $build
-
-            VERSION = "$ver"
-            VERSION_SHORT = "$verShort"
-
-            APP_NAME = "$appName"
-            APP_DESC = "$appDesc"
-            "@ | Set-Content version.py -Encoding UTF8
+            $verPyContent | Set-Content version.py -Encoding UTF8
           }
 
           @"
