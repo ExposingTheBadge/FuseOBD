@@ -12,9 +12,39 @@ import sys
 import os
 
 def get_fuse_dll_path() -> str:
+    """Resolve the path to the Zig-built fuse_j2534.dll.
+
+    Search order:
+      1. Frozen build: the DLL is bundled at PyInstaller's _MEIPASS root.
+      2. Dev: prefer the versioned copy under dist/ (matches frozen layout),
+         then the unversioned one in dist/, then the raw zig-out artifact.
+    Returning the first that exists keeps `python app.py` working in any
+    state of the build (just-after-`zig build`, just-after-`build.py`, or
+    full release)."""
     if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
         return os.path.join(sys._MEIPASS, 'fuse_j2534.dll')
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'dist', 'fuse_j2534-v2.5.0.3.dll'))
+
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+
+    # Read version lazily so a stale import doesn't pin a dead path.
+    try:
+        from version import VERSION as _ver
+    except Exception:
+        _ver = None
+
+    candidates = []
+    if _ver:
+        candidates.append(os.path.join(repo_root, 'dist', f'fuse_j2534-v{_ver}.dll'))
+    candidates += [
+        os.path.join(repo_root, 'dist', 'fuse_j2534.dll'),
+        os.path.join(repo_root, 'zig', 'zig-out', 'bin', 'fuse_j2534.dll'),
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    # Fall through to the zig-out path even if missing — the ctypes loader
+    # will raise a clear OSError pointing at it.
+    return candidates[-1]
 
 class Protocol(IntEnum):
     J1850VPW = 1
