@@ -314,4 +314,55 @@ pub const J2534 = struct {
         const res = self.PassThruGetLastError(buffer);
         if (res != @intFromEnum(J2534Error.STATUS_NOERROR)) return mapError(res);
     }
+
+    pub fn readMsgs(self: *J2534, channelId: u32, msgs: [*]PASSTHRU_MSG, numMsgs: *u32, timeout: u32) !void {
+        const res = self.PassThruReadMsgs(channelId, msgs, numMsgs, timeout);
+        if (res != @intFromEnum(J2534Error.STATUS_NOERROR)) return mapError(res);
+    }
+
+    pub fn writeMsgs(self: *J2534, channelId: u32, msgs: [*]PASSTHRU_MSG, numMsgs: *u32, timeout: u32) !void {
+        const res = self.PassThruWriteMsgs(channelId, msgs, numMsgs, timeout);
+        if (res != @intFromEnum(J2534Error.STATUS_NOERROR)) return mapError(res);
+    }
+
+    pub fn startMsgFilter(self: *J2534, channelId: u32, filterType: FilterType, maskMsg: ?*PASSTHRU_MSG, patternMsg: ?*PASSTHRU_MSG, flowControlMsg: ?*PASSTHRU_MSG) !u32 {
+        var filterId: u32 = 0;
+        const res = self.PassThruStartMsgFilter(channelId, @intFromEnum(filterType), maskMsg, patternMsg, flowControlMsg, &filterId);
+        if (res != @intFromEnum(J2534Error.STATUS_NOERROR)) return mapError(res);
+        return filterId;
+    }
+
+    pub fn stopMsgFilter(self: *J2534, channelId: u32, filterId: u32) !void {
+        const res = self.PassThruStopMsgFilter(channelId, filterId);
+        if (res != @intFromEnum(J2534Error.STATUS_NOERROR)) return mapError(res);
+    }
+
+    pub fn startPeriodicMsg(self: *J2534, channelId: u32, msg: *PASSTHRU_MSG, timeInterval: u32) !u32 {
+        var msgId: u32 = 0;
+        const res = self.PassThruStartPeriodicMsg(channelId, msg, &msgId, timeInterval);
+        if (res != @intFromEnum(J2534Error.STATUS_NOERROR)) return mapError(res);
+        return msgId;
+    }
+
+    pub fn stopPeriodicMsg(self: *J2534, channelId: u32, msgId: u32) !void {
+        const res = self.PassThruStopPeriodicMsg(channelId, msgId);
+        if (res != @intFromEnum(J2534Error.STATUS_NOERROR)) return mapError(res);
+    }
+
+    pub fn ioctl(self: *J2534, channelId: u32, ioctlID: IoctlID, input: ?*anyopaque, output: ?*anyopaque) !void {
+        const res = self.PassThruIoctl(channelId, @intFromEnum(ioctlID), input, output);
+        if (res != @intFromEnum(J2534Error.STATUS_NOERROR)) return mapError(res);
+    }
+
+    pub fn readVersion(self: *J2534, firmwareVersion: [*]u8, dllVersion: [*]u8, apiVersion: [*]u8) !void {
+        const res = self.PassThruReadVersion(self.deviceId orelse return error.DeviceNotConnected, firmwareVersion, dllVersion, apiVersion);
+        if (res != @intFromEnum(J2534Error.STATUS_NOERROR)) return mapError(res);
+    }
+
+    pub fn readBatteryVoltage(self: *J2534) !u32 {
+        var voltage: u32 = 0;
+        const res = self.PassThruIoctl(self.deviceId orelse 0, @intFromEnum(IoctlID.READ_VBATT), null, &voltage);
+        if (res != @intFromEnum(J2534Error.STATUS_NOERROR)) return mapError(res);
+        return voltage;
+    }
 };

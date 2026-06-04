@@ -105,6 +105,11 @@ def build():
     print("  Mode: single-file, no console, windowed traceback disabled")
     print()
 
+    print("Building Zig native J2534 layer (fuse_j2534.dll)...")
+    zig_dir = os.path.join(SCRIPT_DIR, "zig")
+    subprocess.check_call(["zig", "build", "-Dtarget=x86_64-windows", "--release=safe"], cwd=zig_dir)
+    print()
+
     if os.path.exists(SPEC_FILE):
         cmd = [
             sys.executable, "-m", "PyInstaller",
@@ -187,6 +192,17 @@ def build():
         if os.path.exists(versioned_path):
             os.remove(versioned_path)
         os.rename(exe_path, versioned_path)
+        
+        # Copy the Zig DLL to dist/ and rename it to match the versioned exe
+        zig_dll = os.path.join(SCRIPT_DIR, "zig", "zig-out", "bin", "fuse_j2534.dll")
+        if os.path.exists(zig_dll):
+            versioned_dll_name = f"fuse_j2534-v{ver}.dll"
+            versioned_dll_path = os.path.join(DIST_DIR, versioned_dll_name)
+            if os.path.exists(versioned_dll_path):
+                os.remove(versioned_dll_path)
+            shutil.copy2(zig_dll, versioned_dll_path)
+            print(f"Successfully copied and renamed to {versioned_dll_name}")
+            
         size_mb = os.path.getsize(versioned_path) / (1024 * 1024)
         print(f"\nBuild complete: {versioned_path}")
         print(f"Size: {size_mb:.1f} MB")

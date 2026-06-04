@@ -8,6 +8,14 @@ from enum import IntEnum
 from typing import Optional
 
 
+import sys
+import os
+
+def get_fuse_dll_path() -> str:
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        return os.path.join(sys._MEIPASS, 'fuse_j2534.dll')
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'dist', 'fuse_j2534-v2.5.0.3.dll'))
+
 class Protocol(IntEnum):
     J1850VPW = 1
     J1850PWM = 2
@@ -959,77 +967,70 @@ class J2534:
         elif self._is_wifi:
             self._stream = _TcpTransport(device.host, device.tcp_port)
         else:
-            self.dll = ctypes.WinDLL(device.dll_path)
+            self.dll = ctypes.CDLL(get_fuse_dll_path())
             self._setup_functions()
 
     # ── J2534 DLL backend ──
 
     def _setup_functions(self):
-        self._PassThruOpen = self.dll.PassThruOpen
-        self._PassThruOpen.argtypes = [c_void_p, POINTER(c_ulong)]
-        self._PassThruOpen.restype = c_ulong
+        self._PassThruOpen = self.dll.fuse_j2534_open
+        self._PassThruOpen.argtypes = [ctypes.c_char_p]
+        self._PassThruOpen.restype = ctypes.c_int
 
-        self._PassThruClose = self.dll.PassThruClose
-        self._PassThruClose.argtypes = [c_ulong]
-        self._PassThruClose.restype = c_ulong
+        self._PassThruClose = self.dll.fuse_j2534_close
+        self._PassThruClose.argtypes = [ctypes.c_int]
+        self._PassThruClose.restype = ctypes.c_int
 
-        self._PassThruConnect = self.dll.PassThruConnect
-        self._PassThruConnect.argtypes = [c_ulong, c_ulong, c_ulong, c_ulong, POINTER(c_ulong)]
-        self._PassThruConnect.restype = c_ulong
+        self._PassThruConnect = self.dll.fuse_j2534_connect
+        self._PassThruConnect.argtypes = [ctypes.c_int, c_ulong, c_ulong, c_ulong]
+        self._PassThruConnect.restype = ctypes.c_int
 
-        self._PassThruDisconnect = self.dll.PassThruDisconnect
-        self._PassThruDisconnect.argtypes = [c_ulong]
-        self._PassThruDisconnect.restype = c_ulong
+        self._PassThruDisconnect = self.dll.fuse_j2534_disconnect
+        self._PassThruDisconnect.argtypes = [ctypes.c_int, c_ulong]
+        self._PassThruDisconnect.restype = ctypes.c_int
 
-        self._PassThruReadMsgs = self.dll.PassThruReadMsgs
-        self._PassThruReadMsgs.argtypes = [c_ulong, POINTER(PASSTHRU_MSG), POINTER(c_ulong), c_ulong]
-        self._PassThruReadMsgs.restype = c_ulong
+        self._PassThruReadMsgs = self.dll.fuse_j2534_read_msgs
+        self._PassThruReadMsgs.argtypes = [ctypes.c_int, c_ulong, POINTER(PASSTHRU_MSG), POINTER(c_ulong), c_ulong]
+        self._PassThruReadMsgs.restype = ctypes.c_int
 
-        self._PassThruWriteMsgs = self.dll.PassThruWriteMsgs
-        self._PassThruWriteMsgs.argtypes = [c_ulong, POINTER(PASSTHRU_MSG), POINTER(c_ulong), c_ulong]
-        self._PassThruWriteMsgs.restype = c_ulong
+        self._PassThruWriteMsgs = self.dll.fuse_j2534_write_msgs
+        self._PassThruWriteMsgs.argtypes = [ctypes.c_int, c_ulong, POINTER(PASSTHRU_MSG), POINTER(c_ulong), c_ulong]
+        self._PassThruWriteMsgs.restype = ctypes.c_int
 
-        self._PassThruStartMsgFilter = self.dll.PassThruStartMsgFilter
-        self._PassThruStartMsgFilter.argtypes = [
-            c_ulong, c_ulong, POINTER(PASSTHRU_MSG), POINTER(PASSTHRU_MSG),
-            POINTER(PASSTHRU_MSG), POINTER(c_ulong),
-        ]
-        self._PassThruStartMsgFilter.restype = c_ulong
+        self._PassThruReadVersion = self.dll.fuse_j2534_read_version
+        self._PassThruReadVersion.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p]
+        self._PassThruReadVersion.restype = ctypes.c_int
 
-        self._PassThruStopMsgFilter = self.dll.PassThruStopMsgFilter
-        self._PassThruStopMsgFilter.argtypes = [c_ulong, c_ulong]
-        self._PassThruStopMsgFilter.restype = c_ulong
+        self._PassThruGetLastError = self.dll.fuse_j2534_get_last_error
+        self._PassThruGetLastError.argtypes = [ctypes.c_int, ctypes.c_char_p]
+        self._PassThruGetLastError.restype = ctypes.c_int
 
-        self._PassThruStartPeriodicMsg = self.dll.PassThruStartPeriodicMsg
-        self._PassThruStartPeriodicMsg.argtypes = [c_ulong, POINTER(PASSTHRU_MSG), POINTER(c_ulong), c_ulong]
-        self._PassThruStartPeriodicMsg.restype = c_ulong
+        self._fuse_uds_init = self.dll.fuse_uds_init
+        self._fuse_uds_init.argtypes = [ctypes.c_int, c_ulong, c_ulong, c_ulong, c_ulong]
+        self._fuse_uds_init.restype = ctypes.c_int
 
-        self._PassThruStopPeriodicMsg = self.dll.PassThruStopPeriodicMsg
-        self._PassThruStopPeriodicMsg.argtypes = [c_ulong, c_ulong]
-        self._PassThruStopPeriodicMsg.restype = c_ulong
+        self._fuse_uds_free = self.dll.fuse_uds_free
+        self._fuse_uds_free.argtypes = [ctypes.c_int]
+        self._fuse_uds_free.restype = ctypes.c_int
 
-        self._PassThruIoctl = self.dll.PassThruIoctl
-        self._PassThruIoctl.argtypes = [c_ulong, c_ulong, c_void_p, c_void_p]
-        self._PassThruIoctl.restype = c_ulong
+        self._fuse_uds_connect = self.dll.fuse_uds_connect
+        self._fuse_uds_connect.argtypes = [ctypes.c_int]
+        self._fuse_uds_connect.restype = ctypes.c_int
 
-        self._PassThruSetProgrammingVoltage = self.dll.PassThruSetProgrammingVoltage
-        self._PassThruSetProgrammingVoltage.argtypes = [c_ulong, c_ulong, c_ulong]
-        self._PassThruSetProgrammingVoltage.restype = c_ulong
+        self._fuse_uds_disconnect = self.dll.fuse_uds_disconnect
+        self._fuse_uds_disconnect.argtypes = [ctypes.c_int]
+        self._fuse_uds_disconnect.restype = ctypes.c_int
 
-        self._PassThruReadVersion = self.dll.PassThruReadVersion
-        self._PassThruReadVersion.argtypes = [c_ulong, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p]
-        self._PassThruReadVersion.restype = c_ulong
-
-        self._PassThruGetLastError = self.dll.PassThruGetLastError
-        self._PassThruGetLastError.argtypes = [ctypes.c_char_p]
-        self._PassThruGetLastError.restype = c_ulong
+        self._fuse_uds_request = self.dll.fuse_uds_request
+        self._fuse_uds_request.argtypes = [ctypes.c_int, ctypes.c_char_p, c_ulong, ctypes.c_char_p, c_ulong]
+        self._fuse_uds_request.restype = ctypes.c_int
 
     def _check(self, ret: int, context: str = ""):
-        if ret != J2534Error.STATUS_NOERROR:
+        if ret < 0:
             err_buf = ctypes.create_string_buffer(256)
-            self._PassThruGetLastError(err_buf)
+            self._PassThruGetLastError(self.handle, err_buf)
             msg = err_buf.value.decode("ascii", errors="replace")
-            raise PassThruException(ret, f"{context}: {msg}" if context else msg)
+            raise PassThruException(abs(ret), f"{context}: {msg}" if context else msg)
 
     def open(self):
         if self._is_serial or self._is_wifi:
@@ -1071,10 +1072,11 @@ class J2534:
                         pass
                 raise ELM327Exception(f"Could not initialize adapter on {self.device.port}")
         else:
-            dev_id = c_ulong()
-            ret = self._PassThruOpen(None, byref(dev_id))
-            self._check(ret, "PassThruOpen")
-            self.device_id = dev_id.value
+            path_bytes = self.device.dll_path.encode('utf-8')
+            res = self._PassThruOpen(path_bytes)
+            if res < 0:
+                raise PassThruException(J2534Error.ERR_FAILED, "Zig DLL failed to open vendor DLL")
+            self.handle = res
 
     def close(self):
         if self._is_serial or self._is_wifi:
@@ -1082,10 +1084,10 @@ class J2534:
                 self._stream.close()
                 self._stream = None
         else:
-            if self.device_id is not None:
-                ret = self._PassThruClose(self.device_id)
-                self._check(ret, "PassThruClose")
-                self.device_id = None
+            if hasattr(self, 'handle') and self.handle >= 0:
+                self._PassThruClose(self.handle)
+                self.handle = -1
+            self.device_id = None
 
     def read_version(self) -> tuple[str, str, str]:
         if self._is_serial or self._is_wifi:
@@ -1101,7 +1103,7 @@ class J2534:
             fw = ctypes.create_string_buffer(256)
             dll_ver = ctypes.create_string_buffer(256)
             api = ctypes.create_string_buffer(256)
-            ret = self._PassThruReadVersion(self.device_id, fw, dll_ver, api)
+            ret = self._PassThruReadVersion(self.handle, fw, dll_ver, api)
             self._check(ret, "PassThruReadVersion")
             return (
                 fw.value.decode("ascii", errors="replace"),
@@ -1121,7 +1123,7 @@ class J2534:
             return _parse_voltage(resp) if resp else 0.0
         else:
             voltage = c_ulong()
-            ret = self._PassThruIoctl(self.device_id, IoctlID.READ_VBATT, None, byref(voltage))
+            ret = self._PassThruIoctl(self.handle, IoctlID.READ_VBATT, None, byref(voltage))
             self._check(ret, "ReadVBatt")
             return voltage.value / 1000.0
 
@@ -1165,17 +1167,17 @@ class J2534:
             }
             return ch
         else:
-            channel_id = c_ulong()
-            ret = self._PassThruConnect(self.device_id, protocol, flags, baudrate, byref(channel_id))
-            self._check(ret, f"PassThruConnect({protocol.name}, {baudrate})")
-            return channel_id.value
+            res = self._PassThruConnect(self.handle, protocol.value, flags, baudrate)
+            if res < 0:
+                self._check(res, "PassThruConnect")
+            return res
 
     def disconnect(self, channel_id: int):
         if self._is_serial or self._is_wifi:
             self._channels.pop(channel_id, None)
         else:
-            ret = self._PassThruDisconnect(channel_id)
-            self._check(ret, "PassThruDisconnect")
+            res = self._PassThruDisconnect(self.handle, channel_id)
+            self._check(res, "PassThruDisconnect")
 
     def start_msg_filter(self, channel_id: int, filter_type: FilterType,
                          mask: bytes, pattern: bytes, flow_control: Optional[bytes] = None) -> int:

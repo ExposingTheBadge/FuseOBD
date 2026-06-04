@@ -11,6 +11,7 @@ a = Analysis(
         ('LICENSE', '.'),
         ('drivers', 'drivers'),
         ('fuse.ico', '.'),
+        ('zig/zig-out/bin/fuse_j2534.dll', '.'),
     ],
     hiddenimports=[
         'core', 'core.j2534', 'core.protocols', 'core.uds', 'core.vehicle',

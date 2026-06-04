@@ -97,31 +97,47 @@ class UDSClient:
         self.channel_id = self.j2534.connect(
             self.network.protocol, self.network.flags, self.network.baudrate
         )
-        if self.network.can_id_bits == 11:
-            mask = struct.pack(">I", 0x7FF)
-            pattern = struct.pack(">I", self.rx_id)
-            fc = struct.pack(">I", self.tx_id)
+        if not self.j2534._is_serial and not self.j2534._is_wifi:
+            self.zig_uds_handle = self.j2534.dll.fuse_uds_init(
+                self.j2534.handle, self.channel_id, self.tx_id, self.rx_id, self.network.protocol.value
+            )
+            if self.zig_uds_handle < 0:
+                raise Exception("Failed to initialize Zig UDS client")
+            res = self.j2534.dll.fuse_uds_connect(self.zig_uds_handle)
+            if res < 0:
+                raise Exception("Zig UDS connect failed (flow control filter)")
         else:
-            mask = struct.pack(">I", 0x1FFFFFFF)
-            pattern = struct.pack(">I", self.rx_id)
-            fc = struct.pack(">I", self.tx_id)
-        self.filter_id = self.j2534.start_msg_filter(
-            self.channel_id, FilterType.FLOW_CONTROL, mask, pattern, fc
-        )
+            if self.network.can_id_bits == 11:
+                mask = struct.pack(">I", 0x7FF)
+                pattern = struct.pack(">I", self.rx_id)
+                fc = struct.pack(">I", self.tx_id)
+            else:
+                mask = struct.pack(">I", 0x1FFFFFFF)
+                pattern = struct.pack(">I", self.rx_id)
+                fc = struct.pack(">I", self.tx_id)
+            self.filter_id = self.j2534.start_msg_filter(
+                self.channel_id, FilterType.FLOW_CONTROL, mask, pattern, fc
+            )
 
     def disconnect(self):
-        if self.tester_present_id is not None:
-            try:
-                self.j2534.stop_periodic_msg(self.channel_id, self.tester_present_id)
-            except Exception:
-                pass
-            self.tester_present_id = None
-        if self.filter_id is not None:
-            try:
-                self.j2534.stop_msg_filter(self.channel_id, self.filter_id)
-            except Exception:
-                pass
-            self.filter_id = None
+        if hasattr(self, 'zig_uds_handle') and self.zig_uds_handle >= 0:
+            self.j2534.dll.fuse_uds_disconnect(self.zig_uds_handle)
+            self.j2534.dll.fuse_uds_free(self.zig_uds_handle)
+            self.zig_uds_handle = -1
+        else:
+            if self.tester_present_id is not None:
+                try:
+                    self.j2534.stop_periodic_msg(self.channel_id, self.tester_present_id)
+                except Exception:
+                    pass
+                self.tester_present_id = None
+            if self.filter_id is not None:
+                try:
+                    self.j2534.stop_msg_filter(self.channel_id, self.filter_id)
+                except Exception:
+                    pass
+                self.filter_id = None
+            
         if self.channel_id is not None:
             try:
                 self.j2534.disconnect(self.channel_id)
@@ -148,20 +164,34 @@ class UDSClient:
         return None
 
     def request(self, service: int, data: bytes = b"", timeout: Optional[int] = None) -> bytes:
-        self.send_raw(bytes([service]) + data)
-        while True:
-            resp = self.receive_raw(timeout)
-            if resp is None:
-                raise TimeoutError(f"No response to service 0x{service:02X}")
-            if len(resp) == 0:
-                continue
-            if resp[0] == 0x7F and len(resp) >= 3:
-                if resp[2] == NRC.RESPONSE_PENDING:
-                    continue
-                raise UDSException(resp[1], resp[2])
-            if resp[0] == service + 0x40:
+        if hasattr(self, 'zig_uds_handle') and self.zig_uds_handle >= 0:
+            import ctypes
+            req_payload = bytes([service]) + data
+            resp_buf = ctypes.create_string_buffer(4096)
+            res = self.j2534.dll.fuse_uds_request(
+                self.zig_uds_handle, req_payload, len(req_payload), resp_buf, len(resp_buf)
+            )
+            if res < 0:
+                raise TimeoutError(f"No valid response to service 0x{service:02X} or Negative Response")
+            resp = resp_buf.raw[:res]
+            if len(resp) > 0 and resp[0] == service + 0x40:
                 return resp[1:]
-        raise TimeoutError(f"No valid response to service 0x{service:02X}")
+            raise TimeoutError(f"No valid response to service 0x{service:02X}")
+        else:
+            self.send_raw(bytes([service]) + data)
+            while True:
+                resp = self.receive_raw(timeout)
+                if resp is None:
+                    raise TimeoutError(f"No response to service 0x{service:02X}")
+                if len(resp) == 0:
+                    continue
+                if resp[0] == 0x7F and len(resp) >= 3:
+                    if resp[2] == NRC.RESPONSE_PENDING:
+                        continue
+                    raise UDSException(resp[1], resp[2])
+                if resp[0] == service + 0x40:
+                    return resp[1:]
+            raise TimeoutError(f"No valid response to service 0x{service:02X}")
 
     def diagnostic_session(self, session: int = UDSSession.EXTENDED):
         self.request(UDSService.DIAGNOSTIC_SESSION_CONTROL, bytes([session]))
