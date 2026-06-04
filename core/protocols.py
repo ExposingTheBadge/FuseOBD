@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from enum import IntEnum
+from typing import Optional
 from core.j2534 import Protocol, ConnectFlag
 
 
@@ -20,6 +21,13 @@ class FordNetwork(IntEnum):
     CAN_FD_2 = 12
     CAN_FD_3 = 13
     CAN_FD_4 = 14
+    # Pre-CAN / legacy protocols (mostly OBD-II 1996-2007 era Ford).
+    ISO9141 = 15        # K-line @ 10.4 kbps, ISO 9141-2 (5-baud init)
+    KWP2000_SLOW = 16   # K-line ISO 14230-4, 5-baud address init
+    KWP2000_FAST = 17   # K-line ISO 14230-4, fast init (25/50 ms)
+    J1850_PWM = 18      # Ford pre-2003 SCP — pins 2/10, 41.6 kbps
+    J1850_VPW = 19      # GM/Chrysler — pin 2, 10.4 kbps (accessible via shared J2534)
+    J1939 = 20          # Heavy truck/bus 29-bit CAN @ 250 kbps
 
 
 @dataclass
@@ -103,6 +111,191 @@ FORD_CAN_NETWORKS = (
     FORD_MS_CAN_2,
     FORD_CAN_FD, FORD_CAN_FD_2, FORD_CAN_FD_3, FORD_CAN_FD_4,
 )
+
+
+# ── Pre-CAN / legacy network configs ──
+# These cover the 1996-2007 OBD-II Ford lineup and the early CAN
+# transition era. The Protocol enum values come from core.j2534
+# (Protocol.ISO9141 / Protocol.ISO14230 / Protocol.J1850PWM / Protocol.J1850VPW).
+# Wire pinouts are documented in the comments since the OBD-II DLC has
+# different pin usage per protocol.
+
+FORD_ISO9141 = NetworkConfig(
+    name="ISO 9141-2 (K-line)",
+    network=FordNetwork.ISO9141,
+    protocol=Protocol.ISO9141,
+    baudrate=10400,
+    tx_id=0x68, rx_id=0x6B, obd_tx=0x33,
+)
+"""K-line @ 10.4 kbps, 5-baud slow init. OBD-II pin 7 (K), optional pin 15 (L).
+Common on Ford 1996-2003 (most non-CAN PCMs)."""
+
+FORD_KWP2000_SLOW = NetworkConfig(
+    name="KWP2000 5-baud (ISO 14230)",
+    network=FordNetwork.KWP2000_SLOW,
+    protocol=Protocol.ISO14230,
+    baudrate=10400,
+    tx_id=0x68, rx_id=0x6B, obd_tx=0x33,
+)
+"""KWP2000 with 5-baud address init. Same physical layer as ISO 9141 but
+adds the standardized service IDs that became UDS. Used on European Ford
+and some early Mazda 1999-2005."""
+
+FORD_KWP2000_FAST = NetworkConfig(
+    name="KWP2000 Fast Init (ISO 14230)",
+    network=FordNetwork.KWP2000_FAST,
+    protocol=Protocol.ISO14230,
+    baudrate=10400,
+    tx_id=0x68, rx_id=0x6B, obd_tx=0x33,
+)
+"""KWP2000 with 25/50 ms fast init. Same as the slow variant but skips the
+slow 5-baud handshake — preferred on modules that support both."""
+
+FORD_J1850_PWM = NetworkConfig(
+    name="J1850 PWM (Ford SCP)",
+    network=FordNetwork.J1850_PWM,
+    protocol=Protocol.J1850PWM,
+    baudrate=41600,
+    tx_id=0x18DA10F1, rx_id=0x18DAF110, obd_tx=0x18DB33F1,
+)
+"""Ford Standard Corporate Protocol — 41.6 kbps pulse-width modulated.
+OBD-II pins 2 (BUS+) and 10 (BUS-). Used on Ford 1996-2003 (V8 / large
+trucks) until the HS-CAN transition. Logical addressing uses 29-bit-style
+target/source pairs encoded in the message header."""
+
+FORD_J1850_VPW = NetworkConfig(
+    name="J1850 VPW (GM/Chrysler)",
+    network=FordNetwork.J1850_VPW,
+    protocol=Protocol.J1850VPW,
+    baudrate=10400,
+    tx_id=0x68, rx_id=0x6B, obd_tx=0x33,
+)
+"""Variable Pulse Width 10.4 kbps. Not native Ford but reachable via the
+same J2534 adapter — useful when Fuse is probing an unknown OBD-II vehicle
+and we don't yet know the OEM."""
+
+FORD_J1939 = NetworkConfig(
+    name="J1939 (29-bit @ 250k)",
+    network=FordNetwork.J1939,
+    protocol=Protocol.ISO15765,
+    baudrate=250000,
+    flags=ConnectFlag.CAN_29BIT_ID,
+    tx_id=0x18EAFFF9, rx_id=0x18EBFFF9, obd_tx=0x18DB33F1,
+    can_id_bits=29,
+)
+"""SAE J1939 — 29-bit CAN @ 250 kbps. Truck/bus diagnostic standard used by
+Ford F-650 / F-750 / F-MAX commercial platforms. PGN-based addressing is
+fundamentally different from UDS-on-CAN; this entry mostly exists so
+J2534 channels can be opened for sniffing."""
+
+
+# All non-CAN protocol configs — for unknown-vehicle protocol probing on
+# pre-2007 OBD-II ports the scanner should try each in order: ISO9141 →
+# KWP_SLOW → KWP_FAST → J1850_PWM → J1850_VPW.
+FORD_LEGACY_PROTOCOLS = (
+    FORD_ISO9141, FORD_KWP2000_SLOW, FORD_KWP2000_FAST,
+    FORD_J1850_PWM, FORD_J1850_VPW,
+)
+
+
+@dataclass(frozen=True)
+class ProtocolInit:
+    """ELM327 AT command sequence that initialises a given protocol.
+
+    Used by the J2534 wrapper to bring an adapter up on a specific
+    protocol before sending the first diagnostic frame. `at_commands`
+    is in order; each is sent and the response checked for 'OK' (or
+    the protocol-specific positive response).
+    """
+    network: FordNetwork
+    elm_protocol_number: int  # ATSPn argument
+    at_commands: tuple[str, ...]
+    requires_ignition_cycle: bool = False
+    description: str = ""
+
+
+# Map of FordNetwork → ATSP protocol number (the ELM327 'set protocol'
+# argument). Protocols 6-9 are CAN; 1-5 are pre-CAN.
+ELM_PROTOCOL_NUMBERS = {
+    FordNetwork.J1850_PWM:    1,   # SAE J1850 PWM (41.6 kbps)
+    FordNetwork.J1850_VPW:    2,   # SAE J1850 VPW (10.4 kbps)
+    FordNetwork.ISO9141:      3,   # ISO 9141-2 (5-baud init, 10.4 kbps)
+    FordNetwork.KWP2000_SLOW: 4,   # ISO 14230-4 KWP (5-baud init, 10.4 kbps)
+    FordNetwork.KWP2000_FAST: 5,   # ISO 14230-4 KWP (fast init, 10.4 kbps)
+    FordNetwork.HS_CAN:       6,   # ISO 15765-4 CAN (11-bit, 500 kbps)
+    FordNetwork.HS_CAN_EXT:   7,   # ISO 15765-4 CAN (29-bit, 500 kbps)
+    FordNetwork.MS_CAN:       8,   # MS-CAN (Ford-specific)  — adapter dependent
+    FordNetwork.J1939:        9,   # ISO 15765-4 CAN (29-bit, 250 kbps)
+}
+
+
+PROTOCOL_INITS = (
+    ProtocolInit(
+        network=FordNetwork.ISO9141,
+        elm_protocol_number=3,
+        at_commands=("ATZ", "ATE0", "ATSP3", "ATSH 68 6A F1", "ATFI"),
+        requires_ignition_cycle=True,
+        description="K-line slow init — adapter pulses target address at 5 baud, "
+                    "then ramps to 10.4 kbps. Requires key-on / ignition cycle on most ECUs.",
+    ),
+    ProtocolInit(
+        network=FordNetwork.KWP2000_SLOW,
+        elm_protocol_number=4,
+        at_commands=("ATZ", "ATE0", "ATSP4", "ATSH 68 6A F1", "ATFI"),
+        requires_ignition_cycle=True,
+        description="KWP2000 with 5-baud init — same physical layer as ISO 9141 but with KWP services.",
+    ),
+    ProtocolInit(
+        network=FordNetwork.KWP2000_FAST,
+        elm_protocol_number=5,
+        at_commands=("ATZ", "ATE0", "ATSP5", "ATSH 68 6A F1", "ATFI"),
+        description="KWP2000 fast init — 25 ms low + 25 ms high pulse, no 5-baud handshake.",
+    ),
+    ProtocolInit(
+        network=FordNetwork.J1850_PWM,
+        elm_protocol_number=1,
+        at_commands=("ATZ", "ATE0", "ATSP1"),
+        description="J1850 PWM (Ford SCP) — no init handshake; messages start immediately.",
+    ),
+    ProtocolInit(
+        network=FordNetwork.J1850_VPW,
+        elm_protocol_number=2,
+        at_commands=("ATZ", "ATE0", "ATSP2"),
+        description="J1850 VPW — no init handshake; variable-pulse-width framing.",
+    ),
+    ProtocolInit(
+        network=FordNetwork.HS_CAN,
+        elm_protocol_number=6,
+        at_commands=("ATZ", "ATE0", "ATSP6", "ATSH 7DF", "ATAR"),
+        description="ISO 15765-4 (11-bit, 500 kbps) — the modern Ford default.",
+    ),
+    ProtocolInit(
+        network=FordNetwork.HS_CAN_EXT,
+        elm_protocol_number=7,
+        at_commands=("ATZ", "ATE0", "ATSP7", "ATSH 18 DB 33 F1", "ATAR"),
+        description="ISO 15765-4 (29-bit, 500 kbps) — used for OBD-II broadcast in J1939-style.",
+    ),
+    ProtocolInit(
+        network=FordNetwork.MS_CAN,
+        elm_protocol_number=8,
+        at_commands=("ATZ", "ATE0", "ATSP8", "ATSH 7DF", "ATAR"),
+        description="Ford MS-CAN @ 125 kbps — requires adapter that supports MS-CAN pin switch.",
+    ),
+    ProtocolInit(
+        network=FordNetwork.J1939,
+        elm_protocol_number=9,
+        at_commands=("ATZ", "ATE0", "ATSP9", "ATSH 18 EA FF F9"),
+        description="J1939 commercial-truck CAN — 29-bit @ 250 kbps, PGN addressing.",
+    ),
+)
+
+
+def protocol_init_for(network: FordNetwork) -> Optional["ProtocolInit"]:
+    """Return the ELM init descriptor for a network, or None if not supported."""
+    for p in PROTOCOL_INITS:
+        if p.network == network:
+            return p
+    return None
 
 
 @dataclass
