@@ -6,9 +6,20 @@ from core.j2534 import Protocol, ConnectFlag
 class FordNetwork(IntEnum):
     HS_CAN = 1
     MS_CAN = 2
-    HS_CAN_EXT = 3
-    ISO = 4
-    SCP = 5
+    HS_CAN_EXT = 3   # 29-bit HS-CAN (J1939-style addressing)
+    ISO = 4          # ISO 9141 / KWP2000 K-line (pre-CAN K-line vehicles)
+    SCP = 5          # J1850 PWM (legacy Ford pre-2003)
+    # Multi-bus support for newer Ford platforms (Gen 3 architecture +).
+    # A vehicle commonly exposes HS-CAN + MS-CAN + one or more of these.
+    HS_CAN_2 = 6
+    HS_CAN_3 = 7
+    HS_CAN_4 = 8
+    HS_CAN_5 = 9
+    MS_CAN_2 = 10
+    CAN_FD = 11      # CAN-FD (variable data-phase rate, up to 8 Mbps)
+    CAN_FD_2 = 12
+    CAN_FD_3 = 13
+    CAN_FD_4 = 14
 
 
 @dataclass
@@ -56,6 +67,43 @@ FORD_HS_CAN_29BIT = NetworkConfig(
     can_id_bits=29,
 )
 
+# Secondary/tertiary HS-CAN buses on newer multi-bus platforms (Gen 3 EE).
+# Same 500 kbps, same 11-bit framing — the bus is physically distinct but the
+# addressing scheme is identical, so the dataclass differs only by name+enum.
+FORD_HS_CAN_2 = NetworkConfig(name="Ford HS CAN 2", network=FordNetwork.HS_CAN_2,
+                              protocol=Protocol.ISO15765, baudrate=500000)
+FORD_HS_CAN_3 = NetworkConfig(name="Ford HS CAN 3", network=FordNetwork.HS_CAN_3,
+                              protocol=Protocol.ISO15765, baudrate=500000)
+FORD_HS_CAN_4 = NetworkConfig(name="Ford HS CAN 4", network=FordNetwork.HS_CAN_4,
+                              protocol=Protocol.ISO15765, baudrate=500000)
+FORD_HS_CAN_5 = NetworkConfig(name="Ford HS CAN 5", network=FordNetwork.HS_CAN_5,
+                              protocol=Protocol.ISO15765, baudrate=500000)
+FORD_MS_CAN_2 = NetworkConfig(name="Ford MS CAN 2", network=FordNetwork.MS_CAN_2,
+                              protocol=Protocol.ISO15765, baudrate=125000)
+
+# CAN-FD networks — arbitration phase at 500 kbps, data phase up to 8 Mbps.
+# Baudrate here is the arbitration rate; data-phase rate is set on the J2534
+# adapter via PassThruIoctl(SET_CONFIG, CAN_DATA_RATE). 2 Mbps is the most
+# common Ford CANFD data rate on F-150 / Mustang Mach-E / Bronco platforms.
+FORD_CAN_FD   = NetworkConfig(name="Ford CAN FD",   network=FordNetwork.CAN_FD,
+                              protocol=Protocol.ISO15765, baudrate=500000)
+FORD_CAN_FD_2 = NetworkConfig(name="Ford CAN FD 2", network=FordNetwork.CAN_FD_2,
+                              protocol=Protocol.ISO15765, baudrate=500000)
+FORD_CAN_FD_3 = NetworkConfig(name="Ford CAN FD 3", network=FordNetwork.CAN_FD_3,
+                              protocol=Protocol.ISO15765, baudrate=500000)
+FORD_CAN_FD_4 = NetworkConfig(name="Ford CAN FD 4", network=FordNetwork.CAN_FD_4,
+                              protocol=Protocol.ISO15765, baudrate=500000)
+
+# Convenience tuple — every CAN network FuseOBD can target. Ordered so the
+# physical primaries come first (HS, MS, 29-bit) and the multi-bus secondaries
+# follow. Scanner code should iterate this list when probing an unknown vehicle.
+FORD_CAN_NETWORKS = (
+    FORD_HS_CAN, FORD_MS_CAN, FORD_HS_CAN_29BIT,
+    FORD_HS_CAN_2, FORD_HS_CAN_3, FORD_HS_CAN_4, FORD_HS_CAN_5,
+    FORD_MS_CAN_2,
+    FORD_CAN_FD, FORD_CAN_FD_2, FORD_CAN_FD_3, FORD_CAN_FD_4,
+)
+
 
 @dataclass
 class FordModule:
@@ -83,14 +131,16 @@ class FordModule:
 # vehicles (no response → exception → except: continue). That reference's index is
 # partial, so absence-from-reference ≠ wrong-here; unverified entries are kept as-is.
 #
-# OBSERVED-BUT-UNIDENTIFIED CAN IDs (from FUN_0068f1b0 ID-equivalence routing):
-#   short 0x32 ↔ full 0x797   — possibly HVAC alternate address on older platforms
-#   short 0x7C4 ↔ full 0x7C6  — possibly FCIM RX address (would imply rx ≠ tx + 8)
-#   short 0x790 ↔ full 0x7B0  — paired pair, module unidentified
-#   addr 0x791               — appears with "REWRITE_TRM" service-routine string,
-#                              module unidentified (TRM = Transmission/Tire/Trip module?)
-# These need real-vehicle probing or additional source evidence before becoming
-# FORD_MODULES entries.
+# OBSERVED-BUT-UNIDENTIFIED CAN IDs (from FUN_0068f1b0 ID-equivalence routing) —
+# now provisionally added below as unverified entries:
+#   0x797 → gateway/router alternate (routine control via gateway)
+#   0x7B0 → suspected TCM aux / pre-2010 transmission controller
+#   0x791 → REWRITE_TRM service routine (TRM = Transfer Range Module)
+#   0x7E6 → SOBDMC (Secondary On-Board Diagnostic Module Compressor) — hybrid/EV
+#   0x7F2 → physical UDS target, module unidentified
+#   0x7F3 → CAN diagnostic request target, module unidentified
+# 0x7C6 stays a code-comment only — it appears to be a receive-side alternate
+# (rx ≠ tx+8) which the current FordModule shape can't express cleanly.
 FORD_MODULES = [
     # ── Powertrain (HS-CAN, standard OBD2-aligned addressing) ──
     FordModule("Powertrain Control Module", "PCM", 0xE0, FordNetwork.HS_CAN, verified=True),
@@ -147,6 +197,51 @@ FORD_MODULES = [
     FordModule("Rear Differential Control Module", "RDCM", 0x5C, FordNetwork.HS_CAN),
     FordModule("Liftgate Control Module", "LGM", 0x46, FordNetwork.MS_CAN),
     FordModule("Telematic Control Module", "TCU", 0x78, FordNetwork.MS_CAN),
+
+    # ── Hybrid / EV / Secondary OBD ──
+    FordModule("Secondary On-Board Diagnostic Module", "SOBDM", 0xE6, FordNetwork.HS_CAN,
+               description="Hybrid/EV secondary OBD module — referenced by SOBDMC strings"),
+    FordModule("Battery Charger Control Module", "BCCM", 0x09, FordNetwork.HS_CAN,
+               description="On-board AC charger control on PHEV / BEV platforms"),
+    FordModule("DC-DC Converter Control Module", "DCDC", 0x0A, FordNetwork.HS_CAN,
+               description="High-voltage to 12 V DC-DC converter on hybrid/EV"),
+    FordModule("Hybrid Control Unit", "HCU", 0x0B, FordNetwork.HS_CAN,
+               description="Hybrid powertrain coordinator (distinct from HPCM on some platforms)"),
+    FordModule("Transfer Range Module", "TRM", 0x91, FordNetwork.HS_CAN,
+               description="AWD/4x4 transfer case range selector; REWRITE_TRM routine target"),
+
+    # ── Orphan addresses recovered from routing/equivalence tables ──
+    # These appear in the diagnostic protocol routing logic but the originating
+    # reference doesn't label the module. Kept unverified so scan_modules() can
+    # probe them; the module name fields are best-effort guesses.
+    FordModule("Gateway Alternate", "GWMx", 0x97, FordNetwork.HS_CAN,
+               description="Secondary gateway/router CAN ID (0x797) — routine control via gateway"),
+    FordModule("Unknown Module @ 0x7B0", "U7B0", 0xB0, FordNetwork.HS_CAN,
+               description="Suspected TCM auxiliary / pre-2010 transmission controller variant"),
+    FordModule("Unknown Module @ 0x7F2", "U7F2", 0xF2, FordNetwork.HS_CAN,
+               description="Physical UDS request target — module unidentified"),
+    FordModule("Unknown Module @ 0x7F3", "U7F3", 0xF3, FordNetwork.HS_CAN,
+               description="CAN diagnostic request target — module unidentified"),
+
+    # ── ADAS / driver-assist modules (newer platforms) ──
+    FordModule("Side Object Detection (Left)", "SODL", 0x10, FordNetwork.HS_CAN,
+               description="Blind-spot monitoring, left side"),
+    FordModule("Side Object Detection (Right)", "SODR", 0x18, FordNetwork.HS_CAN,
+               description="Blind-spot monitoring, right side"),
+    FordModule("Lane-Keeping Assist", "LKA", 0x16, FordNetwork.HS_CAN,
+               description="Lane-keeping torque actuator (paired with IPMA on later platforms)"),
+    FordModule("Active Park Assist", "APA", 0x15, FordNetwork.HS_CAN,
+               description="Park-assist controller (Active Park Assist 1.0 / 2.0)"),
+
+    # ── Comfort / climate / lighting (later-platform additions) ──
+    FordModule("HVAC Auxiliary", "HVACA", 0x34, FordNetwork.MS_CAN,
+               description="Dual-zone / rear auxiliary HVAC controller"),
+    FordModule("Steering Angle Sensor", "SASM", 0x37, FordNetwork.HS_CAN,
+               description="Standalone steering-angle sensor on platforms that don't bundle it into PSCM/SCCM"),
+    FordModule("Wireless Charging Module", "WACM", 0x47, FordNetwork.MS_CAN,
+               description="Qi wireless phone charger control"),
+    FordModule("Auto Start-Stop Module", "ASSM", 0x48, FordNetwork.HS_CAN,
+               description="Idle stop-start controller (separate from PCM on some platforms)"),
 ]
 
 
