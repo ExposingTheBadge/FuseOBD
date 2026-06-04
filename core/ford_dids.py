@@ -44,6 +44,69 @@ DID_VEHICLE_MODE_DATA          = 0x3A42  # platform-dependent
 DID_CONFIGURATION_DATA         = 0x3A50  # platform-dependent
 DID_TRANSMISSION_DATA_BASE     = 0x5910  # 0x5910-0x5952 range on TCM
 
+# ── ISO 14229-1 standard DIDs (0xF180-0xF1FF) ──
+# Many Ford modules implement a subset of these; the ones not implemented
+# return NRC 0x31 (request out of range). They're added here so the DID
+# registry has names to display when a module DOES respond to one.
+DID_ISO_BOOT_SOFTWARE_ID                = 0xF180  # boot software identification
+DID_ISO_APPLICATION_SOFTWARE_ID         = 0xF181  # application software identification
+DID_ISO_APPLICATION_DATA_ID             = 0xF182  # application data identification
+DID_ISO_BOOT_SOFTWARE_FINGERPRINT       = 0xF183
+DID_ISO_APPLICATION_SOFTWARE_FINGERPRINT = 0xF184
+DID_ISO_APPLICATION_DATA_FINGERPRINT    = 0xF185
+DID_ISO_ACTIVE_DIAG_SESSION             = 0xF186  # current diagnostic session
+DID_ISO_SPARE_PART_NUMBER               = 0xF187  # ECU spare-part number
+DID_ISO_ECU_SOFTWARE_NUMBER             = 0xF188  # ECU software number
+DID_ISO_ECU_SOFTWARE_VERSION            = 0xF189
+DID_ISO_SUPPLIER_ID                     = 0xF18A  # system supplier identification
+DID_ISO_ECU_MANUFACTURING_DATE          = 0xF18B  # 4 bytes: YY MM DD (BCD)
+DID_ISO_ECU_SERIAL_NUMBER               = 0xF18C  # ASCII serial number
+DID_ISO_SUPPORTED_FUNCTIONAL_UNITS      = 0xF18D
+DID_ISO_ECU_MANUFACTURER                = 0xF18E
+DID_ISO_VIN                             = 0xF190  # ASCII VIN (17 chars) — standard
+DID_ISO_HARDWARE_PART_NUMBER            = 0xF191
+DID_ISO_SYSTEM_SUPPLIER_HW_PART_NUMBER  = 0xF192
+DID_ISO_SYSTEM_SUPPLIER_HW_VERSION      = 0xF193
+DID_ISO_SYSTEM_SUPPLIER_SW_PART_NUMBER  = 0xF194
+DID_ISO_SYSTEM_SUPPLIER_SW_VERSION      = 0xF195
+DID_ISO_EXHAUST_REGULATION_OR_TYPE      = 0xF196
+DID_ISO_SYSTEM_NAME                     = 0xF197
+DID_ISO_REPAIR_SHOP_CODE                = 0xF198
+DID_ISO_PROGRAMMING_DATE                = 0xF199  # 4 bytes: YY MM DD (BCD)
+DID_ISO_CALIBRATION_REPAIR_SHOP_CODE    = 0xF19A
+DID_ISO_CALIBRATION_DATE                = 0xF19B
+DID_ISO_CALIBRATION_EQUIPMENT_SW_NUMBER = 0xF19C
+DID_ISO_ECU_INSTALLATION_DATE           = 0xF19D
+DID_ISO_ODX_FILE                        = 0xF19E
+DID_ISO_ENTITY                          = 0xF19F
+
+# ── Ford-specific DIDs harvested from decompilation ──
+# Where the module/format is documented, it's noted on the registry entry below.
+DID_FORD_VIN_ALT_BCM            = 0xF110  # ASCII VIN as stored by BCM (separate from PCM 0xF190)
+DID_FORD_PATS_DATA              = 0xF110  # On IPC/PATS context: passive anti-theft data block
+DID_FORD_VIN_SEGMENT            = 0xF120  # VIN segment on some Ford modules (BCM/IPC)
+DID_FORD_MILEAGE                = 0xF188  # Ford-specific mileage value (overlaps ISO; Ford uses it both ways)
+DID_FORD_VIN_SEGMENT_A6         = 0xF1A6  # Ford VIN segment / odometer extended
+DID_FORD_TOTAL_DISTANCE         = 0xDD01  # Master odometer / total distance (PCM PID 0xA6 equivalent)
+DID_FORD_DD00_DIAG              = 0xDD00  # Diagnostic data block
+DID_FORD_CAL_PART_1             = 0xDE00  # Ford calibration identifier — base
+DID_FORD_CAL_PART_2             = 0xDE01  # Ford calibration identifier — map version
+DID_FORD_CAL_PART_3             = 0xDE02  # Ford calibration identifier — data revision
+DID_FORD_MEMORY_ADDRESS_PROMPT  = 0xDE05  # Hex-address input prompt (debugging path)
+DID_FORD_PROPRIETARY_SECURITY   = 0xDE07  # Ford proprietary security / ID block
+DID_IPC_ODOMETER_PRIMARY        = 0x4A47  # IPC odometer DID (primary attempt)
+DID_IPC_ODOMETER_FALLBACK       = 0x4A46  # IPC odometer DID (fallback)
+DID_PCM_ODOMETER_EXTENDED       = 0x11E2D  # Extended odometer path used by PCM
+DID_FORD_BOOTLOADER_INFO        = 0x11C1  # Bootloader information block
+DID_FORD_SECURITY_SEED_REQUEST  = 0x114D  # Service $22 path for SecurityAccess seed (some modules)
+DID_FORD_SECURITY_KEY_SEND      = 0x1165  # Service $22 path for SecurityAccess key (some modules)
+DID_FORD_MODULE_SPECIFIC        = 0x1928  # Module-specific data block
+
+# VIN-character DIDs — Ford splits the 17-character VIN into 4-byte chunks
+# on some PCM strategies. Range 0xD102-0xD109 already covered above as marks;
+# these are the alternate readout addresses used by the secondary ECU type.
+DID_FORD_VIN_CHAR_BASE          = 0x9907  # 0x229907-0x22993E range; one char per DID
+
 
 @dataclass(frozen=True)
 class FordDID:
@@ -72,6 +135,27 @@ def _decode_percent_byte(data: bytes) -> str:
     if not data:
         return ""
     return f"{data[0] * 100 / 255:.1f}%"
+
+
+def _decode_bcd_date(data: bytes) -> str:
+    """ISO 14229 manufacturing/programming date format — 4 BCD bytes: YY YY MM DD."""
+    if len(data) < 4:
+        return data.hex().upper()
+    try:
+        year = (data[0] >> 4) * 1000 + (data[0] & 0xF) * 100 + (data[1] >> 4) * 10 + (data[1] & 0xF)
+        month = (data[2] >> 4) * 10 + (data[2] & 0xF)
+        day   = (data[3] >> 4) * 10 + (data[3] & 0xF)
+        return f"{year:04d}-{month:02d}-{day:02d}"
+    except Exception:
+        return data.hex().upper()
+
+
+def _decode_odometer_be(data: bytes) -> str:
+    """Ford master odometer — typically 3-4 byte big-endian km value."""
+    if not data:
+        return ""
+    n = int.from_bytes(data[:4], "big")
+    return f"{n:,} km"
 
 
 FORD_DID_REGISTRY: dict[int, FordDID] = {
@@ -105,6 +189,60 @@ FORD_DID_REGISTRY: dict[int, FordDID] = {
         DID_PCM_FUEL_LEVEL_TANK, "Fuel Level (Tank)",
         units="%", decoder=_decode_percent_byte,
     ),
+
+    # ── ISO 14229 standard DIDs ──
+    DID_ISO_BOOT_SOFTWARE_ID:                FordDID(0xF180, "Boot Software Identification",         decoder=_decode_ascii),
+    DID_ISO_APPLICATION_SOFTWARE_ID:         FordDID(0xF181, "Application Software Identification",  decoder=_decode_ascii),
+    DID_ISO_APPLICATION_DATA_ID:             FordDID(0xF182, "Application Data Identification",      decoder=_decode_ascii),
+    DID_ISO_BOOT_SOFTWARE_FINGERPRINT:       FordDID(0xF183, "Boot Software Fingerprint"),
+    DID_ISO_APPLICATION_SOFTWARE_FINGERPRINT: FordDID(0xF184, "Application Software Fingerprint"),
+    DID_ISO_APPLICATION_DATA_FINGERPRINT:    FordDID(0xF185, "Application Data Fingerprint"),
+    DID_ISO_ACTIVE_DIAG_SESSION:             FordDID(0xF186, "Active Diagnostic Session"),
+    DID_ISO_SPARE_PART_NUMBER:               FordDID(0xF187, "Spare Part Number",                    decoder=_decode_ascii),
+    DID_ISO_ECU_SOFTWARE_NUMBER:             FordDID(0xF188, "ECU Software Number",                  decoder=_decode_ascii),
+    DID_ISO_ECU_SOFTWARE_VERSION:            FordDID(0xF189, "ECU Software Version",                 decoder=_decode_ascii),
+    DID_ISO_SUPPLIER_ID:                     FordDID(0xF18A, "System Supplier Identification",       decoder=_decode_ascii),
+    DID_ISO_ECU_MANUFACTURING_DATE:          FordDID(0xF18B, "ECU Manufacturing Date",               decoder=_decode_bcd_date),
+    DID_ISO_ECU_SERIAL_NUMBER:               FordDID(0xF18C, "ECU Serial Number",                    decoder=_decode_ascii),
+    DID_ISO_SUPPORTED_FUNCTIONAL_UNITS:      FordDID(0xF18D, "Supported Functional Units"),
+    DID_ISO_ECU_MANUFACTURER:                FordDID(0xF18E, "ECU Manufacturer",                     decoder=_decode_ascii),
+    DID_ISO_VIN:                             FordDID(0xF190, "Vehicle Identification Number (VIN)",  decoder=_decode_ascii),
+    DID_ISO_HARDWARE_PART_NUMBER:            FordDID(0xF191, "Hardware Part Number",                 decoder=_decode_ascii),
+    DID_ISO_SYSTEM_SUPPLIER_HW_PART_NUMBER:  FordDID(0xF192, "System Supplier HW Part Number",       decoder=_decode_ascii),
+    DID_ISO_SYSTEM_SUPPLIER_HW_VERSION:      FordDID(0xF193, "System Supplier HW Version",           decoder=_decode_ascii),
+    DID_ISO_SYSTEM_SUPPLIER_SW_PART_NUMBER:  FordDID(0xF194, "System Supplier SW Part Number",       decoder=_decode_ascii),
+    DID_ISO_SYSTEM_SUPPLIER_SW_VERSION:      FordDID(0xF195, "System Supplier SW Version",           decoder=_decode_ascii),
+    DID_ISO_EXHAUST_REGULATION_OR_TYPE:      FordDID(0xF196, "Exhaust Regulation / Type Approval"),
+    DID_ISO_SYSTEM_NAME:                     FordDID(0xF197, "System Name / Engine Type",            decoder=_decode_ascii),
+    DID_ISO_REPAIR_SHOP_CODE:                FordDID(0xF198, "Repair Shop Code"),
+    DID_ISO_PROGRAMMING_DATE:                FordDID(0xF199, "Programming Date",                     decoder=_decode_bcd_date),
+    DID_ISO_CALIBRATION_REPAIR_SHOP_CODE:    FordDID(0xF19A, "Calibration Repair Shop Code"),
+    DID_ISO_CALIBRATION_DATE:                FordDID(0xF19B, "Calibration Date",                     decoder=_decode_bcd_date),
+    DID_ISO_CALIBRATION_EQUIPMENT_SW_NUMBER: FordDID(0xF19C, "Calibration Equipment SW Number",      decoder=_decode_ascii),
+    DID_ISO_ECU_INSTALLATION_DATE:           FordDID(0xF19D, "ECU Installation Date",                decoder=_decode_bcd_date),
+    DID_ISO_ODX_FILE:                        FordDID(0xF19E, "ODX File Identifier",                  decoder=_decode_ascii),
+    DID_ISO_ENTITY:                          FordDID(0xF19F, "Entity Identifier"),
+
+    # ── Ford-specific DIDs ──
+    DID_FORD_VIN_ALT_BCM:           FordDID(0xF110, "VIN (BCM / PATS data)",        decoder=_decode_ascii,
+                                            notes="ASCII VIN on BCM/IPC; passive anti-theft block when read from PATS-capable module"),
+    DID_FORD_VIN_SEGMENT:           FordDID(0xF120, "VIN Segment",                  decoder=_decode_ascii),
+    DID_FORD_VIN_SEGMENT_A6:        FordDID(0xF1A6, "VIN Segment / Extended Odometer"),
+    DID_FORD_TOTAL_DISTANCE:        FordDID(0xDD01, "Total Distance (Master Odometer)",  units="km",
+                                            decoder=_decode_odometer_be,
+                                            notes="PCM total-distance counter — equivalent to OBD-II PID 0xA6"),
+    DID_FORD_DD00_DIAG:             FordDID(0xDD00, "Diagnostic Data Block"),
+    DID_FORD_CAL_PART_1:            FordDID(0xDE00, "Calibration Part 1 (Base)",        decoder=_decode_ascii),
+    DID_FORD_CAL_PART_2:            FordDID(0xDE01, "Calibration Part 2 (Map Version)", decoder=_decode_ascii),
+    DID_FORD_CAL_PART_3:            FordDID(0xDE02, "Calibration Part 3 (Data Rev)",    decoder=_decode_ascii),
+    DID_FORD_PROPRIETARY_SECURITY:  FordDID(0xDE07, "Proprietary Security / ID Block",
+                                            notes="Ford-specific — read prior to SecurityAccess on some modules"),
+    DID_IPC_ODOMETER_PRIMARY:       FordDID(0x4A47, "IPC Odometer (Primary)",       units="km",
+                                            decoder=_decode_odometer_be),
+    DID_IPC_ODOMETER_FALLBACK:      FordDID(0x4A46, "IPC Odometer (Fallback)",      units="km",
+                                            decoder=_decode_odometer_be),
+    DID_FORD_BOOTLOADER_INFO:       FordDID(0x11C1, "Bootloader Info"),
+    DID_FORD_MODULE_SPECIFIC:       FordDID(0x1928, "Module-Specific Data Block"),
 }
 
 
