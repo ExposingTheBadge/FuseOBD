@@ -302,6 +302,17 @@ class AIMechanicWindow(QMainWindow):
         chat_v.setContentsMargins(0, 0, 0, 0)
         chat_v.setSpacing(4)
 
+        # Sub-header — mirrors the "Issues & Findings" header on the right
+        # so both panes start their content at the same vertical position.
+        chat_hdr = QHBoxLayout()
+        ctitle = QLabel("Conversation")
+        cf = QFont(); cf.setBold(True); cf.setPointSize(11)
+        ctitle.setFont(cf)
+        ctitle.setStyleSheet("color:#ff8800;")
+        chat_hdr.addWidget(ctitle)
+        chat_hdr.addStretch(1)
+        chat_v.addLayout(chat_hdr)
+
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -450,7 +461,6 @@ class AIMechanicWindow(QMainWindow):
             f"dtcs={len(dtc_data) if dtc_data else 0}"
         )
         self._clear_bubbles()
-        self._append_bubble("system", "Starting AI Mechanic session...")
         self.status_label.setText("Connecting...")
         self._set_status("Starting AI Mechanic session...")
 
