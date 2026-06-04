@@ -47,7 +47,32 @@ PATS_DIDS = {
     "PCMID": 0x6108,
     "PATS_ABS_ALGO": 0x6120,
     "NUM_KEYS": 0x6130,
+    # Newer PATS / SecuriLock variants expose additional info DIDs.
+    # These are tried opportunistically — modules that don't support them
+    # return NRC 0x31 and we move on.
+    "KEY_SERIAL_BASE": 0x6131,     # first programmed key transponder serial
+    "VEHICLE_AUTH_CODE": 0x6140,   # IDS Authentication Code on later platforms
+    "PATS_FLAGS": 0x6150,          # bit-packed: bit0=disabled, bit1=securilock, ...
 }
+
+
+# Routine IDs for PATS operations (UDS 0x31 RoutineControl).
+PATS_ROUTINES = {
+    "PROGRAM_KEY":  0xFF00,
+    "ERASE_KEYS":   0xFF01,
+    "PARITY_CHECK": 0xFF02,
+    "VERIFY_KEY":   0xFF03,
+}
+
+
+class PATSError(RuntimeError):
+    """Raised for PATS-specific failures — wraps NRCs in human terms."""
+
+
+class PATSConsentRequired(PATSError):
+    """Raised by destructive PATS operations when the caller did not pass
+    `confirm=True`. The intent is to make 'accidentally erased all keys' a
+    multi-step mistake instead of a one-call mistake — see erase_keys()."""
 
 
 class PATSManager:
@@ -155,13 +180,26 @@ class PATSManager:
         pcm.security_access_key(level + 1, key_bytes)
         return True
 
-    def program_key(self, callback=None) -> bool:
+    def program_key(self, callback=None, confirm: bool = False,
+                    timeout_seconds: int = 30) -> bool:
+        """Add a new key to the PATS keypool.
+
+        `confirm=True` must be passed explicitly — guards against accidental
+        invocation. After the key-learn routine fires, polls NUM_KEYS for up
+        to `timeout_seconds` to detect when the new key joins the pool.
+        """
+        if not confirm:
+            raise PATSConsentRequired(
+                "program_key() is a destructive PATS operation. Re-call with "
+                "confirm=True after confirming with the user. Make sure the "
+                "new key transponder is physically ready before confirming."
+            )
         if callback:
             callback("Reading PATS configuration...")
         self.read_pats_info()
 
         if self.pats_info.pats_type == -1:
-            raise RuntimeError("Could not read PATS type from vehicle")
+            raise PATSError("Could not read PATS type from vehicle")
 
         if callback:
             callback("Requesting security access...")
@@ -173,7 +211,7 @@ class PATSManager:
                 delay = self.pats_info.timed_delay * 60
                 if callback:
                     callback(f"Security delay active. Wait {delay}s. Cycle ignition key.")
-                raise RuntimeError(
+                raise PATSError(
                     f"PATS security delay active. Turn ignition off, wait "
                     f"{self.pats_info.timed_delay} minutes, turn back on, try again."
                 )
@@ -183,8 +221,8 @@ class PATSManager:
             callback("Security access granted. Starting key learn procedure...")
 
         pcm = self._get_pcm()
-
-        pcm.routine_control(0xFF00, 0x01)
+        before = self.read_key_count()
+        pcm.routine_control(PATS_ROUTINES["PROGRAM_KEY"], 0x01)
 
         if callback:
             callback(
@@ -192,12 +230,54 @@ class PATSManager:
                 f"{self.pats_info.cycle_key_time} seconds."
             )
 
-        return True
+        # Poll NUM_KEYS to see when the new key actually shows up. PATS
+        # routines fire-and-forget — there's no positive completion signal
+        # other than the count incrementing.
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            time.sleep(1.0)
+            current = self.read_key_count()
+            if current >= 0 and before >= 0 and current > before:
+                if callback:
+                    callback(f"Key programmed. NUM_KEYS = {current}")
+                return True
+            if callback:
+                callback(f"Waiting for key learn… ({int(deadline - time.monotonic())}s remaining)")
 
-    def erase_keys(self, callback=None) -> bool:
+        if callback:
+            callback("Key-learn poll timed out — the new key may still be valid "
+                     "if the cycle was completed late. Re-read NUM_KEYS to confirm.")
+        return False
+
+    def erase_keys(self, callback=None, confirm: bool = False) -> bool:
+        """Erase ALL programmed keys from the keypool — vehicle will not start
+        without re-programming at least two new keys afterward.
+
+        `confirm=True` must be passed explicitly. Safety rails:
+          - won't run if PATS isn't enabled (no point)
+          - won't run if there are fewer keys than min_keys (already locked
+            out, escalating only makes it worse)
+        """
+        if not confirm:
+            raise PATSConsentRequired(
+                "erase_keys() will WIPE every programmed key. The vehicle will "
+                "not start until you program at least min_keys new keys. "
+                "Re-call with confirm=True only after the user has confirmed "
+                "this destructive operation."
+            )
         if callback:
             callback("Reading PATS configuration...")
         self.read_pats_info()
+
+        if self.pats_info.pats_enabled == 0:
+            raise PATSError("PATS is disabled — erase_keys() is a no-op and not run.")
+        before = self.pats_info.num_keys_programmed
+        if 0 <= before < max(2, self.pats_info.min_keys):
+            raise PATSError(
+                f"Refusing to erase: vehicle already has fewer keys ({before}) "
+                f"than min_keys ({self.pats_info.min_keys}). Programming a key "
+                f"first is the recovery path; erasing makes the lockout worse."
+            )
 
         if callback:
             callback("Requesting security access for key erase...")
@@ -207,11 +287,28 @@ class PATSManager:
 
         if callback:
             callback("Erasing all programmed keys...")
-        pcm.routine_control(0xFF01, 0x01)
+        pcm.routine_control(PATS_ROUTINES["ERASE_KEYS"], 0x01)
 
         if callback:
-            callback("Keys erased. You must program at least 2 new keys.")
+            callback("Keys erased. You must program at least 2 new keys before "
+                     "the engine will start.")
         return True
+
+    def test_challenge(self, outcode: int) -> int:
+        """Diagnostic helper: compute the incode for a given outcode using
+        the currently-read PATS type + algo + module ID. Doesn't touch the
+        vehicle — purely a local calculation for verifying our algorithm
+        against a known good outcode/incode pair from another tool."""
+        if self.pats_info.pats_type == -1:
+            self.read_pats_info()
+        if self.pats_info.pats_type == -1:
+            raise PATSError("Cannot test challenge — PATS type unknown")
+        return compute_incode(
+            outcode,
+            self.pats_info.pats_type,
+            self.pats_info.pcm_id,
+            self.pats_info.algo_variant,
+        )
 
     def read_key_count(self) -> int:
         pcm = self._get_pcm()
