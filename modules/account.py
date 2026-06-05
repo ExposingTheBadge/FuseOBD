@@ -255,6 +255,23 @@ def boot() -> None:
         _log(f"account: boot refresh failed ({e}) — token kept for retry")
 
 
+def is_server_reachable(timeout: float = 3.0) -> bool:
+    """Quick reachability probe used to decide whether the auto-popup
+    sign-in nudge is worth showing. Any HTTP response (even 404/401) is
+    proof the server is up; only URLError (DNS, refused, timeout) counts
+    as unreachable. Never raises."""
+    try:
+        _http("GET", "/", timeout=timeout)
+        return True
+    except AccountError as e:
+        # _http wraps URLError as AccountError(code=-1); anything else
+        # (e.g. HTTPError that round-tripped to a real status) wouldn't
+        # have made it here as an exception in the first place.
+        return e.code != -1
+    except Exception:
+        return False
+
+
 def auth_token() -> Optional[str]:
     return _session_token
 

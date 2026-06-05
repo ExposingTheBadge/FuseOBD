@@ -417,9 +417,29 @@ class FuseMainWindow(QMainWindow):
         """First-run nudge — show the sign-in dialog if there's no saved
         session. The user can dismiss with X if they prefer to browse
         anonymously; that just keeps the AI Mechanic locked until they
-        sign in later."""
+        sign in later.
+
+        When the Fuse OBD server is unreachable we suppress the dialog
+        and surface a one-shot notice instead — pushing a login form the
+        user can't actually use is confusing.
+        """
         try:
             if account.is_signed_in():
+                return
+            if not account.is_server_reachable():
+                issues_log.log_app_event(
+                    "sign-in nudge skipped: Fuse OBD server unreachable"
+                )
+                from PyQt6.QtWidgets import QMessageBox
+                QMessageBox.information(
+                    self,
+                    "Fuse OBD server unavailable",
+                    "Can't reach the Fuse OBD account server right now, so the "
+                    "sign-in prompt has been skipped.\n\n"
+                    "Free offline features (DTC read/clear, VIN, bus monitor) "
+                    "still work. Try signing in from the Account tab once your "
+                    "connection is back.",
+                )
                 return
             dlg = AuthDialog(self)
             dlg.exec()
