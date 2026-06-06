@@ -104,8 +104,16 @@ class FuseMainWindow(QMainWindow):
 
     def _install_exception_hook(self):
         """Capture uncaught exceptions into the persistent issues log so the
-        AI Mechanic can read them later."""
+        AI Mechanic can read them later AND ship a crash report to the
+        Fuse-Web admin triage panel via modules.error_reporter."""
         prev = sys.excepthook
+        # Install the dedicated server-side error reporter (idempotent;
+        # safe to call here even if other code already kicked it off).
+        try:
+            from modules.error_reporter import reporter
+            reporter.install()
+        except Exception:
+            pass
 
         def hook(exc_type, exc, tb):
             try:
@@ -167,6 +175,9 @@ class FuseMainWindow(QMainWindow):
         act_lic.triggered.connect(self._show_license)
         help_menu.addAction(act_lic)
         help_menu.addSeparator()
+        act_bug = QAction("Report a bug…", self)
+        act_bug.triggered.connect(self._open_bug_report_dialog)
+        help_menu.addAction(act_bug)
         act_web = QAction("Visit Website", self)
         act_web.triggered.connect(lambda: webbrowser.open(HOMEPAGE))
         help_menu.addAction(act_web)
@@ -648,6 +659,71 @@ class FuseMainWindow(QMainWindow):
         btn_row.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignCenter)
         v.addLayout(btn_row)
 
+        dlg.exec()
+
+    def _open_bug_report_dialog(self):
+        """Help → Report a bug — collect a one-paragraph description
+        and ship as kind='user_report' to /api/v1/errors/submit."""
+        from PyQt6.QtWidgets import QLineEdit
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Report a bug — Fuse OBD")
+        dlg.resize(560, 380)
+        v = QVBoxLayout(dlg)
+
+        lbl = QLabel(
+            "Tell us what went wrong. Be as specific as you can — what you "
+            "were doing, what you expected, what actually happened. The "
+            "app version, OS, and recent logs are attached automatically."
+        )
+        lbl.setWordWrap(True)
+        v.addWidget(lbl)
+
+        title_in = QLineEdit()
+        title_in.setPlaceholderText("Short title (e.g. \"crashes when reading DTCs on 2018 F-150\")")
+        v.addWidget(title_in)
+
+        body_in = QTextEdit()
+        body_in.setPlaceholderText("Steps to reproduce, what you expected, what happened, anything else.")
+        v.addWidget(body_in, stretch=1)
+
+        status = QLabel("")
+        status.setStyleSheet("color:#aaa; font-size:11px;")
+        v.addWidget(status)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(dlg.reject)
+        send = QPushButton("Send report")
+        row.addWidget(cancel); row.addWidget(send)
+        v.addLayout(row)
+
+        def submit():
+            title = title_in.text().strip()
+            body = body_in.toPlainText().strip()
+            if not title:
+                status.setText("Title is required.")
+                status.setStyleSheet("color:#ff6666; font-size:11px;")
+                return
+            send.setEnabled(False)
+            status.setText("Sending…")
+            try:
+                from modules.error_reporter import reporter
+                # Pre-pack some context the server can use to triage.
+                ctx = {
+                    "current_panel": getattr(self.notebook, "currentIndex",
+                                              lambda: None)(),
+                    "vehicle_connected": self.vehicle is not None,
+                }
+                reporter.report_user_bug(title, body, context=ctx)
+                status.setText("Thanks — report queued. The reporter retries on its own if the network is down right now.")
+                status.setStyleSheet("color:#16a34a; font-size:11px;")
+                QTimer.singleShot(1800, dlg.accept)
+            except Exception as e:
+                status.setText(f"Couldn't queue the report: {e}")
+                status.setStyleSheet("color:#ff6666; font-size:11px;")
+                send.setEnabled(True)
+        send.clicked.connect(submit)
         dlg.exec()
 
     def _show_license(self):

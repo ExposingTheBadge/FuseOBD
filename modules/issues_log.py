@@ -478,7 +478,7 @@ def log_exception(
     if user_action:
         simple = user_action.rstrip() + "\n\n" + simple
     technical = f"{exc.__class__.__module__}.{exc.__class__.__name__}: {exc}\n\n{tb}"
-    return add_issue(
+    issue = add_issue(
         title=title,
         kind=kind,
         severity=severity,
@@ -487,3 +487,16 @@ def log_exception(
         source=source,
         context={"exception_type": exc.__class__.__name__},
     )
+    # Also fire-and-forget a copy to the server's error-report inbox so
+    # the admin triage panel sees it. Wrapped in try/except so a missing
+    # reporter never makes a logging path worse than the original
+    # exception.
+    try:
+        from modules.error_reporter import reporter
+        reporter.report_error(title, message=str(exc),
+                              traceback_str=tb, severity=severity,
+                              context={"source": source, "kind": kind,
+                                       "exception_type": exc.__class__.__name__})
+    except Exception:
+        pass
+    return issue
