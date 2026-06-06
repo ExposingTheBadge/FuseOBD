@@ -101,6 +101,44 @@ class ConnectionPanel(BasePanel):
             self.devices = enumerate_devices()
             self._update_combo()
             _log(f"REFRESH: found {len(self.devices)} devices")
+            # Also surface any adapters whose USB device is plugged in
+            # but whose driver isn't bound — these would otherwise be
+            # invisible (no COM port appears, so enumerate_devices()
+            # doesn't see them) and the user would be left wondering
+            # why their adapter doesn't show up.
+            try:
+                from core.drivers import needs_driver_install
+                missing = needs_driver_install()
+                if missing:
+                    msgs = []
+                    for s in missing:
+                        msgs.append(f"{s.adapter.name} ({s.adapter.driver}) — {s.adapter.driver_url or 'no URL'}")
+                    _log("DRIVER MISSING: " + " | ".join(msgs))
+                    try:
+                        from modules import issues_log
+                        issues_log.add_issue(
+                            title=f"{len(missing)} adapter(s) need a driver",
+                            kind=issues_log.KIND_CONNECTION,
+                            severity=issues_log.SEVERITY_MED,
+                            summary_simple=(
+                                "Found USB OBD adapter(s) plugged in that don't have a "
+                                "working Windows driver. The adapter won't appear in the "
+                                "Connect dropdown until you install the right one.\n\n"
+                                + "\n".join("• " + m for m in msgs)
+                            ),
+                            summary_technical="\n".join(
+                                f"{s.adapter.name}: needs {s.adapter.driver}, "
+                                f"VID/PID {s.vid_pid}, instance {s.instance_id}, "
+                                f"driver URL {s.adapter.driver_url}"
+                                for s in missing
+                            ),
+                            source="connection_panel.refresh_devices",
+                            context={"missing_count": len(missing)},
+                        )
+                    except Exception:
+                        pass
+            except Exception as e:
+                _log(f"driver-check skipped: {e}")
         except Exception as e:
             _log(f"REFRESH ERROR: {e}\n{traceback.format_exc()}")
 

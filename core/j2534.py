@@ -416,8 +416,23 @@ def _scan_for_com_child(parent_path: str, port_entries: list,
             for _dp, pn in port_entries:
                 if pn == port_name and pn not in matched:
                     matched.add(pn)
-                    name = _clean_device_name(friendly) or f"OBD Adapter ({pn})"
-                    vendor = _strip_atref(mfg) or _vid_pid_vendor(vid_pid)
+                    # Try the offline library first — VID/PID lookup
+                    # against data/adapters_db.py gives us the real
+                    # adapter name before the user clicks Connect.
+                    name = ""
+                    vendor = ""
+                    try:
+                        from data.adapters_db import by_vid_pid_str
+                        spec = by_vid_pid_str(vid_pid)
+                        if spec:
+                            name = spec.name
+                            vendor = spec.vendor
+                    except Exception:
+                        spec = None
+                    if not name:
+                        name = _clean_device_name(friendly) or f"OBD Adapter ({pn})"
+                    if not vendor:
+                        vendor = _strip_atref(mfg) or _vid_pid_vendor(vid_pid)
                     devices.append(J2534Device(
                         name=name,
                         vendor=vendor,
