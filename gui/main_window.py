@@ -30,6 +30,7 @@ from version import VERSION, VERSION_SHORT, APP_NAME, APP_DESC, BUILD
 from modules.updater import check_async, UpdateInfo
 from modules import issues_log
 from modules import account
+from modules.vehicle_sync import sync as vehicle_sync
 
 
 AUTHOR = "Brent Gordon"
@@ -268,11 +269,43 @@ class FuseMainWindow(QMainWindow):
         except Exception as e:
             warn(self, "MS CAN", f"Could not open MS CAN: {e}")
 
+        # Open a streaming session to the Fuse-Web server so every event
+        # and PID poll from here on lands in the user's account history.
+        # No-op when the user isn't signed in or the server is down.
+        try:
+            adapter_name = ""
+            adapter_vendor = ""
+            adapter_port = ""
+            try:
+                dev = j2534.device
+                adapter_name = getattr(dev, "name", "") or ""
+                adapter_vendor = getattr(dev, "vendor", "") or ""
+                adapter_port = getattr(dev, "port", "") or getattr(dev, "host", "") or ""
+            except Exception:
+                pass
+            vehicle_sync.start_session(
+                adapter_name=adapter_name,
+                adapter_vendor=adapter_vendor,
+                adapter_port=adapter_port,
+                protocol="HS-CAN" if hs_ok else ("MS-CAN" if ms_ok else ""),
+            )
+        except Exception:
+            pass
+
         # Verify communication by reading VIN
         try:
             vin = self.vehicle.read_vin()
             if vin and len(vin) == 17:
                 self.global_status.setText(f"Connected — VIN: {vin}")
+                # Tell the server which vehicle this session belongs
+                # to. The server creates the vehicle row the first
+                # time it sees this VIN under the user's account.
+                try:
+                    vehicle_sync.identify_vehicle(vin)
+                    vehicle_sync.emit_event("vin", title=f"VIN identified: {vin}",
+                                            payload={"vin": vin})
+                except Exception:
+                    pass
             else:
                 self.global_status.setText("Connected — Vehicle not responding (check ignition is ON)")
                 warn(self, "No Response",
@@ -297,6 +330,10 @@ class FuseMainWindow(QMainWindow):
         if self.vehicle:
             self.vehicle.disconnect_all()
             self.vehicle = None
+        try:
+            vehicle_sync.end_session()
+        except Exception:
+            pass
         self.global_status.setText(f"{APP_NAME} v{VERSION} — Disconnected")
 
     def _get_vehicle(self) -> Optional[VehicleConnection]:

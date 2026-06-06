@@ -2,6 +2,7 @@ pywin32>=306
 anthropic>=0.40.0
 pyserial>=3.5
 PyQt6>=6.6
+websocket-client>=1.8
 
 # Build dependencies (for creating FUSE.exe)
 pyinstaller>=6.0

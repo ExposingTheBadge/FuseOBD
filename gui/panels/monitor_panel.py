@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import (
 from modules.pid import (
     PIDMonitor, PIDReading, PIDDefinition, STANDARD_PIDS, FORD_EXTENDED_PIDS,
 )
+from modules.vehicle_sync import sync as vehicle_sync
 from gui.qt_helpers import BasePanel
 
 
@@ -155,6 +156,23 @@ class MonitorPanel(BasePanel):
         self.status_label.setText("Monitoring...")
 
     def _on_readings(self, readings: dict[int, PIDReading]):
+        # Stream each sample to the server. Runs on the monitor thread —
+        # vehicle_sync queues internally so we never block the polling
+        # loop. No-op when not signed in.
+        for did, reading in readings.items():
+            try:
+                numeric = None
+                try: numeric = float(reading.display_value)
+                except (TypeError, ValueError): numeric = None
+                vehicle_sync.emit_sample(
+                    pid=f"{did:04X}",
+                    value=numeric,
+                    value_text=str(reading.display_value) if numeric is None else None,
+                    unit=getattr(reading.pid, "unit", "") or "",
+                )
+            except Exception:
+                pass
+
         def update():
             # Build a lookup by iid
             id_to_idx: dict[str, int] = {}

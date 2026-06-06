@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
 from core.protocols import FORD_MODULES
 from modules.dtc import DTCReader, ModuleDTCs
 from modules.vehicle_info import decode_vin, get_vehicle_image_url
+from modules.vehicle_sync import sync as vehicle_sync
 from data.dtc_definitions import lookup_dtc
 from gui.qt_helpers import BasePanel, run_thread, confirm
 
@@ -152,6 +153,25 @@ class DTCPanel(BasePanel):
                             module_abbrev=module.abbreviation,
                             dtcs=dtcs,
                         ))
+                        # Stream each DTC as its own event so the web
+                        # records page lists every fault with a real
+                        # timestamp (the moment we read it).
+                        for d in dtcs:
+                            try:
+                                status = "ACTIVE" if d.is_active else ("PENDING" if d.is_pending else "STORED")
+                                vehicle_sync.emit_event(
+                                    "dtc",
+                                    module=module.abbreviation,
+                                    code=getattr(d, "code", "") or "",
+                                    title=getattr(d, "description", "") or status,
+                                    payload={
+                                        "status": status,
+                                        "raw": getattr(d, "raw", None),
+                                        "description": getattr(d, "description", ""),
+                                    },
+                                )
+                            except Exception:
+                                pass
                 except Exception:
                     pass
 
