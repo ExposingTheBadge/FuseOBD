@@ -57,12 +57,44 @@ PATS_DIDS = {
 
 
 # Routine IDs for PATS operations (UDS 0x31 RoutineControl).
+#
+# Historically these were inlined Ford-specific magic values; they're
+# kept here for backward-compat callers but cross-referenced against
+# the canonical UDS routine catalog in data/uds_routines.py. The
+# Ford-canonical routine IDs (0xB001 family) ARE distinct from the
+# ISO-reserved 0xFF00 family — Ford modules accept both depending on
+# firmware vintage. We fall back to the 0xFF00 set when the catalog's
+# B-series isn't accepted.
 PATS_ROUTINES = {
     "PROGRAM_KEY":  0xFF00,
     "ERASE_KEYS":   0xFF01,
     "PARITY_CHECK": 0xFF02,
     "VERIFY_KEY":   0xFF03,
 }
+
+
+def _routine_spec(routine_id: int):
+    """Lazy lookup against the central catalog so the PATS panel can
+    show 'B001 — PATS Begin Key Learn (security required)' instead of
+    a bare hex constant. Returns None when the catalog doesn't have it
+    (e.g. for the legacy 0xFF00 family)."""
+    try:
+        from data.uds_routines import lookup
+        return lookup(routine_id)
+    except Exception:
+        return None
+
+
+def is_destructive_routine(routine_id: int) -> bool:
+    """Hook the PATS panel calls before invoking a routine — returns
+    True for anything the catalog flags as destructive (key erase,
+    flash erase, etc) so the UI can require an explicit confirm
+    dialog."""
+    try:
+        from data.uds_routines import is_destructive
+        return is_destructive(routine_id)
+    except Exception:
+        return False
 
 
 class PATSError(RuntimeError):
