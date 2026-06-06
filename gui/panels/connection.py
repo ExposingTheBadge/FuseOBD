@@ -419,6 +419,47 @@ class ConnectionPanel(BasePanel):
                 friendly = ident.label()
                 _log(f"Identified: kind={ident.kind} vendor={ident.vendor} model={ident.model} fw={ident.firmware}")
 
+                # Compare the firmware against the latest known version
+                # for this adapter family. Outdated -> raise an issue with
+                # the vendor's update URL pre-filled (so the AI Mechanic
+                # can walk the user through fixing it).
+                try:
+                    from core.firmware_check import check as fw_check, Status
+                    fw_status = fw_check(ident.kind, ident.firmware)
+                    _log(f"Firmware: {fw_status.display}")
+                    if fw_status.needs_update:
+                        try:
+                            issues_log.add_issue(
+                                title=f"{ident.model or ident.kind} firmware update available "
+                                      f"({fw_status.current} → {fw_status.latest})",
+                                kind=issues_log.KIND_CONNECTION,
+                                severity=issues_log.SEVERITY_LOW,
+                                summary_simple=(
+                                    f"Your {ident.model or ident.kind} reports firmware "
+                                    f"{fw_status.current}. The latest known version FuseOBD "
+                                    f"ships with is {fw_status.latest}. Updating may fix "
+                                    f"weird ECU responses, add CAN-FD support on capable "
+                                    f"adapters, or improve baud-rate stability.\n\n"
+                                    f"Update path: {fw_status.notes or 'See vendor URL'}\n"
+                                    f"Download: {fw_status.update_url}"
+                                ),
+                                summary_technical=(
+                                    f"Adapter kind: {ident.kind}\n"
+                                    f"Current FW:   {fw_status.current}\n"
+                                    f"Latest known: {fw_status.latest}\n"
+                                    f"Update URL:   {fw_status.update_url}\n"
+                                    f"Notes:        {fw_status.notes}"
+                                ),
+                                source="connection_panel._connect.firmware_check",
+                                context={"kind": ident.kind, "current": fw_status.current,
+                                         "latest": fw_status.latest,
+                                         "url": fw_status.update_url},
+                            )
+                        except Exception:
+                            pass
+                except Exception as e:
+                    _log(f"firmware-check skipped: {e}")
+
                 voltage = 0.0
                 try:
                     voltage = self.j2534.read_battery_voltage()

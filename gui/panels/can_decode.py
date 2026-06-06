@@ -351,4 +351,86 @@ def annotate_tx_rx(tag: str, message: str) -> str:
     ann = decode_uds(payload)
     if ann:
         return f"{ann}  [{target_label}]" if target_label else ann
+
+    # Last resort: try the bundled DBC databases. If this frame's CAN ID
+    # matches a known message in any loaded .dbc file (Ford/Lincoln by
+    # default — see data/dbc/__init__.py), surface the decoded signals
+    # so the user sees "EngineRpm=1200 VehSpd=64" instead of raw bytes.
+    ann = decode_dbc(target, payload)
+    if ann:
+        return f"{ann}  [{target_label}]" if target_label else ann
     return ""
+
+
+# ── DBC lookup ───────────────────────────────────────────────────────
+# Lazy-loaded merged database. Loading takes ~50 ms on first hit, then
+# every subsequent annotation is a single dict lookup.
+
+_DBC_DB = None
+_DBC_LOAD_FAILED = False
+
+
+def _get_dbc():
+    global _DBC_DB, _DBC_LOAD_FAILED
+    if _DBC_DB is not None or _DBC_LOAD_FAILED:
+        return _DBC_DB
+    try:
+        from data import dbc as dbc_pkg
+        _DBC_DB = dbc_pkg.load_make("Ford")  # also covers Lincoln
+    except Exception:
+        _DBC_LOAD_FAILED = True
+    return _DBC_DB
+
+
+_HEX_RE = re.compile(r'\b([0-9A-Fa-f]{3,8})\b')
+
+
+def _extract_can_id(target: str) -> int:
+    """The target token in a log line is the module name or the CAN ID
+    in hex (e.g. '03B' or '7E8'). Returns 0 when it isn't a plain hex
+    number."""
+    if not target:
+        return 0
+    m = _HEX_RE.fullmatch(target.strip())
+    if not m:
+        return 0
+    try:
+        return int(m.group(1), 16)
+    except ValueError:
+        return 0
+
+
+def decode_dbc(target: str, payload: bytes) -> str:
+    """Return a compact 'sig1=val1 sig2=val2 …' annotation when this
+    frame matches a bundled DBC message. Empty string when no DB is
+    loaded or the CAN ID is unknown."""
+    db = _get_dbc()
+    if not db:
+        return ""
+    can_id = _extract_can_id(target)
+    if not can_id:
+        return ""
+    msg = db.by_id(can_id)
+    if not msg or not msg.signals:
+        return ""
+    try:
+        decoded = []
+        # Limit to the first 6 signals so the annotation line stays readable;
+        # the user can drill in via a future "show all signals" UI.
+        for sig in msg.signals[:6]:
+            try:
+                v = sig.decode(payload)
+            except Exception:
+                continue
+            if isinstance(v, float):
+                v_disp = f"{v:.3g}"
+            else:
+                v_disp = str(v)
+            unit = f" {sig.unit}" if sig.unit else ""
+            decoded.append(f"{sig.name}={v_disp}{unit}")
+        if not decoded:
+            return ""
+        extra = f" (+{len(msg.signals)-6} more)" if len(msg.signals) > 6 else ""
+        return f"{msg.name}: " + "  ".join(decoded) + extra
+    except Exception:
+        return ""
