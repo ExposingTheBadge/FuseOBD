@@ -134,6 +134,12 @@ CATALOG: list[dict] = [
      "bus": "HS-CAN",   "notes": "R1T/R1S primary actuator bus"},
     {"make": "Rivian",  "file": "rivian_park_assist_can.dbc",
      "bus": "HS-CAN",   "notes": "R1T/R1S park-assist CAN"},
+
+    # ── Acura (only Honda-family DBC publicly available; Honda proper
+    # isn't in opendbc — Honda CAN reverse engineering lives in
+    # openpilot's selfdrive/car as Python car-specific code) ──
+    {"make": "Acura",   "file": "acura_ilx_2016_nidec.dbc",
+     "bus": "HS-CAN",   "notes": "2016 Acura ILX (Honda Nidec EPS platform)"},
 ]
 
 
