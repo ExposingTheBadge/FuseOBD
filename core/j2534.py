@@ -1081,9 +1081,12 @@ class J2534:
                         _il.log_adapter(f"ELM: {msg}")
                     except Exception:
                         pass
-                # Try last-known baud rate first, then fall back to full scan
+                # Try last-known baud rate first, then fall back to the
+                # full ordered scan. Order is curated by observed adapter
+                # frequency — see core/adapter_id.py#COMMON_BAUDS.
+                from core.adapter_id import COMMON_BAUDS
                 _LAST_BAUD = getattr(J2534, '_last_baud', 500000)
-                bauds = [_LAST_BAUD] + [b for b in (38400, 115200, 500000, 230400, 9600, 921600) if b != _LAST_BAUD]
+                bauds = [_LAST_BAUD] + [b for b in COMMON_BAUDS if b != _LAST_BAUD]
                 for baud in bauds:
                     try:
                         _log(f'Trying {baud} baud...')

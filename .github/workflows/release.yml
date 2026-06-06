@@ -252,3 +252,24 @@ jobs:
           name: FuseOBD ${{ steps.bump.outputs.tag }}
           body: ${{ steps.notes.outputs.body }}
           files: dist/signing/FuseOBD-v${{ steps.bump.outputs.version }}.exe
+
+      # Push data/compatibility.json to fuseobd.com so the website's
+      # homepage VIN-checker and the "Check" button on the My Vehicles
+      # add dialog reflect exactly which year/make/models the build we
+      # just signed claims it can talk to. Skipped on dry-run and on a
+      # missing FUSE_ADMIN_TOKEN — won't fail the release for a non-
+      # essential post-step.
+      - name: Sync compatibility manifest
+        if: github.event.inputs.dry_run != 'true' && env.FUSE_ADMIN_TOKEN != ''
+        env:
+          FUSE_ADMIN_TOKEN: ${{ secrets.FUSE_ADMIN_TOKEN }}
+          FUSE_ACCOUNT_BASE_URL: ${{ vars.FUSE_ACCOUNT_BASE_URL }}
+        shell: pwsh
+        run: |
+          # The manifest is optional — skip cleanly if the build doesn't
+          # ship one. Same exit-code contract the script promises.
+          if (-not (Test-Path "data/compatibility.json")) {
+            Write-Host "no data/compatibility.json — skipping compat sync"
+            exit 0
+          }
+          python tools/upload_compatibility.py

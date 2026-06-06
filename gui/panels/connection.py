@@ -371,6 +371,16 @@ class ConnectionPanel(BasePanel):
                 _log("Open OK, reading version...")
                 fw, dll, api = self.j2534.read_version()
                 _log(f"Version: FW={fw} DLL={dll} API={api}")
+
+                # Classify the adapter from its ATI / version response
+                # so the dropdown shows "OBDLink MX+ r5.4.2" instead of
+                # "OBD Adapter (COM7)". The combined fw+dll string gives
+                # us the best chance of catching vendor variants.
+                from core.adapter_id import identify
+                ident = identify(f"{fw} {dll}".strip())
+                friendly = ident.label()
+                _log(f"Identified: kind={ident.kind} vendor={ident.vendor} model={ident.model} fw={ident.firmware}")
+
                 voltage = 0.0
                 try:
                     voltage = self.j2534.read_battery_voltage()
@@ -379,6 +389,17 @@ class ConnectionPanel(BasePanel):
                     _log(f"Voltage error: {ve}")
 
                 def on_connected():
+                    # Surface the identified adapter wherever the
+                    # generic "OBD Adapter (COMx)" was previously shown.
+                    if friendly and friendly != device.name:
+                        device.name = friendly
+                        # Refresh the dropdown label for the current
+                        # selection so the user sees what they connected
+                        # to next time the dialog opens.
+                        cur = self.device_combo.currentIndex()
+                        if cur >= 0:
+                            port_suffix = f"  ({device.port})" if device.port else ""
+                            self.device_combo.setItemText(cur, friendly + port_suffix)
                     self.version_label.setText(f"FW: {fw}  API: {api}")
                     if voltage > 0:
                         self.voltage_label.setText(f"Battery: {voltage:.1f}V")

@@ -1,0 +1,36 @@
+{
+  "_comment": "Vehicles this build of FuseOBD can talk to. Uploaded to Fuse-Web's /api/v1/compat/manifest endpoint by tools/upload_compatibility.py at release time. The website's homepage VIN-checker and the My Vehicles 'Check' button look up against the resulting compatible_vehicles table.",
+  "_format": "Each entry: { year (int|null = any year), make (required), model (string|null = any model), trim (string|null = any trim), coverage ('full'|'partial'|'dtc-only'|'pats-only'|'asbuilt-only'), notes (free text) }",
+  "_coverage_legend": {
+    "full":         "Module scan, DTC read/clear, live PIDs, PATS, As-Built read/write, Security Access, bus monitor all work",
+    "partial":      "OBD-II generic (Mode $01 PIDs, generic DTCs, VIN read) plus best-effort Ford-specific modules",
+    "dtc-only":     "Generic OBD-II DTC read/clear only",
+    "pats-only":    "Key programming only",
+    "asbuilt-only": "Factory-settings read/write only"
+  },
+  "client_version": null,
+  "replace": true,
+  "entries": [
+    {
+      "make": "Ford",
+      "year": null,
+      "model": null,
+      "coverage": "partial",
+      "notes": "OBD-II generic across all years (1996+). Ford-specific modules (PATS, As-Built, module scanner, PIDs from PCM/BCM/IPC/ABS/RCM/EPAS/APIM/etc) work best on 2008+ CAN-based vehicles. Earlier (1996-2007) ISO9141/J1850 vehicles get generic DTC + VIN + a subset of standard PIDs."
+    },
+    {
+      "make": "Lincoln",
+      "year": null,
+      "model": null,
+      "coverage": "partial",
+      "notes": "Lincoln shares Ford's module architecture and uses the same UDS/CAN protocols — coverage matches Ford by year. Includes legacy Mark/Town Car/Continental as well as modern Aviator/Navigator/Nautilus."
+    },
+    {
+      "make": "Mercury",
+      "year": null,
+      "model": null,
+      "coverage": "partial",
+      "notes": "Mercury shared Ford's module architecture until the brand was discontinued in 2010 — Sable, Grand Marquis, Mariner, Mountaineer, Milan, etc. all supported with the same coverage as the equivalent Ford model-year."
+    }
+  ]
+}

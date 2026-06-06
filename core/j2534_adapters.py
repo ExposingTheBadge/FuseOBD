@@ -137,17 +137,123 @@ ADAPTERS: list[Adapter] = [
         notes="Limited — HS-CAN + K-line only",
     ),
 
-    # ── ELM327-class (STN-based + clones) — go last as fallbacks ──
+    # ── ScanTool OBDLink family (STN-based, genuine) ──
     Adapter(
-        name="STN1170 (ScanTool / OBDLink)",
-        match_patterns=("STN1170", "STN 1170", "OBDLink"),
+        name="OBDLink MX+",
+        match_patterns=("OBDLink MX+", "OBDLink MX +", "OBDLink MX Plus"),
+        caps=AdapterCap.HS_CAN | AdapterCap.MS_CAN | AdapterCap.CAN_FD
+             | AdapterCap.ISO9141 | AdapterCap.KWP2000
+             | AdapterCap.J1850_VPW | AdapterCap.J1850_PWM
+             | AdapterCap.HIGH_BAUD | AdapterCap.GENUINE,
+        notes="STN2255 chipset — Bluetooth + USB, full Ford MS-CAN, CAN-FD",
+    ),
+    Adapter(
+        name="OBDLink EX",
+        match_patterns=("OBDLink EX",),
+        caps=AdapterCap.HS_CAN | AdapterCap.MS_CAN | AdapterCap.CAN_FD
+             | AdapterCap.ISO9141 | AdapterCap.KWP2000
+             | AdapterCap.J1850_VPW | AdapterCap.J1850_PWM
+             | AdapterCap.HIGH_BAUD | AdapterCap.GENUINE,
+        notes="STN2120 chipset — USB only, Ford/Mazda focus",
+    ),
+    Adapter(
+        name="OBDLink CX",
+        match_patterns=("OBDLink CX",),
+        caps=AdapterCap.HS_CAN | AdapterCap.MS_CAN | AdapterCap.CAN_FD
+             | AdapterCap.ISO9141 | AdapterCap.KWP2000
+             | AdapterCap.J1850_VPW | AdapterCap.J1850_PWM
+             | AdapterCap.HIGH_BAUD | AdapterCap.GENUINE,
+        notes="STN2120 chipset — BLE-only, iOS + Android",
+    ),
+    Adapter(
+        name="OBDLink LX",
+        match_patterns=("OBDLink LX",),
+        caps=AdapterCap.HS_CAN | AdapterCap.ISO9141 | AdapterCap.KWP2000
+             | AdapterCap.J1850_VPW | AdapterCap.J1850_PWM
+             | AdapterCap.HIGH_BAUD | AdapterCap.GENUINE,
+        notes="STN1130 chipset — Bluetooth, no MS-CAN",
+    ),
+    Adapter(
+        name="OBDLink SX",
+        match_patterns=("OBDLink SX",),
+        caps=AdapterCap.HS_CAN | AdapterCap.ISO9141 | AdapterCap.KWP2000
+             | AdapterCap.J1850_VPW | AdapterCap.J1850_PWM
+             | AdapterCap.HIGH_BAUD | AdapterCap.GENUINE,
+        notes="STN1110 chipset — USB cable, entry-level",
+    ),
+
+    # ── vLinker family (Vgate, STN1170-based) ──
+    Adapter(
+        name="vLinker FS USB",
+        match_patterns=("vLinker FS", "vLinker-FS"),
+        caps=AdapterCap.HS_CAN | AdapterCap.MS_CAN | AdapterCap.CAN_FD
+             | AdapterCap.ISO9141 | AdapterCap.KWP2000
+             | AdapterCap.J1850_PWM | AdapterCap.HIGH_BAUD | AdapterCap.GENUINE,
+        notes="STN1170 chipset, USB — Ford-specific (FEPS-aware), supports MS-CAN",
+    ),
+    Adapter(
+        name="vLinker MC+",
+        match_patterns=("vLinker MC+", "vLinker MC +", "vLinker MC Plus"),
         caps=AdapterCap.HS_CAN | AdapterCap.MS_CAN | AdapterCap.ISO9141
              | AdapterCap.KWP2000 | AdapterCap.J1850_VPW | AdapterCap.J1850_PWM
              | AdapterCap.HIGH_BAUD | AdapterCap.GENUINE,
+        notes="STN1170 chipset — Bluetooth + WiFi, multi-protocol",
+    ),
+    Adapter(
+        name="vLinker BM+",
+        match_patterns=("vLinker BM+", "vLinker BM +", "vLinker BM Plus"),
+        caps=AdapterCap.HS_CAN | AdapterCap.MS_CAN | AdapterCap.ISO9141
+             | AdapterCap.KWP2000 | AdapterCap.HIGH_BAUD | AdapterCap.GENUINE,
+        notes="STN1170 chipset, BMW-tuned but works on Ford with MS-CAN",
+    ),
+
+    # ── Other STN chipsets (vendor-relabeled) ──
+    Adapter(
+        name="STN1170-based (generic)",
+        match_patterns=("STN1170", "STN 1170"),
+        caps=AdapterCap.HS_CAN | AdapterCap.MS_CAN | AdapterCap.ISO9141
+             | AdapterCap.KWP2000 | AdapterCap.J1850_VPW | AdapterCap.J1850_PWM
+             | AdapterCap.HIGH_BAUD,
         notes="STN1170-based ELM-compatible — supports MS-CAN via User Protocol B",
     ),
     Adapter(
-        name="ELM327",
+        name="STN2255-based (generic)",
+        match_patterns=("STN2255", "STN 2255"),
+        caps=AdapterCap.HS_CAN | AdapterCap.MS_CAN | AdapterCap.CAN_FD
+             | AdapterCap.ISO9141 | AdapterCap.KWP2000
+             | AdapterCap.J1850_VPW | AdapterCap.J1850_PWM | AdapterCap.HIGH_BAUD,
+    ),
+    Adapter(
+        name="STN1110-based (generic)",
+        match_patterns=("STN1110", "STN 1110"),
+        caps=AdapterCap.HS_CAN | AdapterCap.ISO9141 | AdapterCap.KWP2000
+             | AdapterCap.J1850_VPW | AdapterCap.J1850_PWM | AdapterCap.HIGH_BAUD,
+    ),
+
+    # ── Other branded ELMs ──
+    Adapter(
+        name="PLX Kiwi 3",
+        match_patterns=("Kiwi 3", "Kiwi3"),
+        caps=AdapterCap.HS_CAN | AdapterCap.ISO9141 | AdapterCap.KWP2000
+             | AdapterCap.GENUINE,
+        notes="PLX Devices Kiwi 3 — ELM327 v2.2-compatible BLE",
+    ),
+    Adapter(
+        name="BAFX Bluetooth",
+        match_patterns=("BAFX",),
+        caps=AdapterCap.HS_CAN | AdapterCap.ISO9141 | AdapterCap.KWP2000,
+        notes="BAFX Products ELM327 BT — solid Chinese clone",
+    ),
+    Adapter(
+        name="Veepeak Mini",
+        match_patterns=("Veepeak",),
+        caps=AdapterCap.HS_CAN | AdapterCap.ISO9141 | AdapterCap.KWP2000,
+        notes="Veepeak ELM327 mini — common clone",
+    ),
+
+    # ── ELM327 generic fallback — go LAST so vendor variants win ──
+    Adapter(
+        name="ELM327 (generic)",
         match_patterns=("ELM327", "ELM 327", "ELM v"),
         caps=AdapterCap.HS_CAN | AdapterCap.ISO9141 | AdapterCap.KWP2000,
         notes="Generic ELM327 — MS-CAN only with hardware pin modification",
