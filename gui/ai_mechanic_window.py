@@ -335,7 +335,9 @@ class AIMechanicWindow(QMainWindow):
         self.input = QPlainTextEdit()
         self.input.setPlaceholderText(
             "Ask the AI Mechanic anything — about your car, your OBD adapter, "
-            "or this app. Shift+Enter for newline, Enter to send."
+            "or this app. Shift+Enter for newline, Enter to send.\n"
+            "Slash commands:  /claude <prompt> — consult Claude Code on the server.  "
+            "/claude-reset — start a fresh Claude session."
         )
         self.input.setFixedHeight(80)
         self.input.setStyleSheet(
@@ -504,6 +506,47 @@ class AIMechanicWindow(QMainWindow):
         self.input.clear()
         self._append_bubble("user", text)
 
+        # ── Slash commands ──
+        # /claude <prompt>  → consult Claude Code CLI on the Fuse-Web
+        #                     server (requires admin or an account with
+        #                     ai_routing_prefs.upstream='claude_cli').
+        # /claude-reset      → forget the cached consult session so the
+        #                     next /claude starts a fresh conversation.
+        if text.startswith("/claude-reset"):
+            try:
+                from modules.claude_consult import reset_session
+                reset_session()
+                self._append_bubble("system", "Claude consult session reset.")
+            except Exception as e:
+                self._append_bubble("error", f"reset failed: {e}")
+            self._processing = False
+            self.status_label.setText("Ready")
+            return
+        if text.startswith("/claude "):
+            prompt = text[len("/claude "):].strip()
+            if not prompt:
+                self._append_bubble("system", "Usage: /claude <prompt>")
+                self._processing = False
+                return
+            self._set_status("Consulting Claude Code…")
+            self._processing = True
+            self.status_label.setText("Claude…")
+
+            def claude_worker():
+                try:
+                    from modules.claude_consult import consult, ConsultError
+                    response = consult(prompt)
+                    self._post_to_ui(lambda: self._on_claude_reply(response))
+                except ConsultError as e:
+                    msg = e.message
+                    self._post_to_ui(lambda m=msg: self._on_claude_error(m))
+                except Exception as e:
+                    msg = str(e)
+                    self._post_to_ui(lambda m=msg: self._on_claude_error(m))
+
+            threading.Thread(target=claude_worker, daemon=True).start()
+            return
+
         # Friendly acknowledgment so the user knows we're on it.
         self._set_status("Let me look into that...")
 
@@ -519,6 +562,21 @@ class AIMechanicWindow(QMainWindow):
                                          kind=issues_log.KIND_APP,
                                          source="ai_mechanic_window")
             self._post_to_ui(lambda: self._on_assistant_reply(response))
+
+    def _on_claude_reply(self, response: str):
+        self._clear_status()
+        self._append_bubble("mechanic",
+            "**Claude Code:**\n\n" + (response or "(no response)"))
+        self.status_label.setText("Ready")
+        self._processing = False
+        self.input.setFocus()
+
+    def _on_claude_error(self, msg: str):
+        self._clear_status()
+        self._append_bubble("error", f"Claude consult failed: {msg}")
+        self.status_label.setText("Ready")
+        self._processing = False
+        self.input.setFocus()
 
         threading.Thread(target=worker, daemon=True).start()
 
