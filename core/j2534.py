@@ -619,16 +619,18 @@ class _WinSerial:
             rtscts=False,
             dsrdtr=False,
         )
-        # FTDI chips: DTR must be asserted to power the ELM327, latency set to 1ms
+        # FTDI chips: DTR must be asserted to power the ELM327.
         self._ser.dtr = True
         self._ser.rts = False
-        try:
-            # Reduce FTDI latency timer from 16ms to 1ms for fast CAN
-            import ctypes
-            ctypes.windll.kernel32.SetCommTimeouts(self._ser._port_handle, ctypes.byref(
-                ctypes.create_string_buffer(20)))
-        except Exception:
-            pass
+        # NOTE: we used to call SetCommTimeouts here with a zeroed struct,
+        # thinking it tweaked the FTDI latency timer. It doesn't — it puts
+        # the port into "block until first byte" mode, which deadlocked
+        # every baud-scan attempt against adapters that ignore the wrong
+        # baud (e.g. vLinker FS USB defaults to 921600; probing at 500000
+        # hung the worker thread forever). pyserial's own timeout= argument
+        # above is correct; leave it alone. The FTDI latency timer is a
+        # different setting and lives in Device Manager → Port → Advanced
+        # (or the FTDI D2XX FT_SetLatencyTimer API, which we don't use).
 
     def close(self):
         if self._ser is not None:
