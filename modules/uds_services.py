@@ -52,6 +52,36 @@ class SID:
 
     NEGATIVE_RESPONSE                   = 0x7F
 
+    # ── KWP2000 / ISO 14230 legacy services that some older Ford
+    # modules (and most FCA pre-2014 modules) still implement.
+    # Mined from alfa-analysis indexes 2026-06-06 — the AlfaOBD binary
+    # services these on pre-UDS K-line buses, and Ford uses overlapping
+    # subsets on 1996-2008 ISO9141/KWP modules.
+    KWP_START_DIAGNOSTIC_SESSION        = 0x10  # same as UDS, but with KWP sub-functions
+    KWP_STOP_DIAGNOSTIC_SESSION         = 0x20
+    KWP_ECU_RESET                       = 0x11
+    KWP_READ_FREEZE_FRAME_DATA          = 0x12
+    KWP_READ_DTC_BY_STATUS              = 0x18
+    KWP_READ_ECU_IDENTIFICATION         = 0x1A   # KWP-only; UDS uses 0x22 with F1xx DID
+    KWP_READ_DATA_BY_COMMON_ID          = 0x1A
+    KWP_READ_DATA_BY_LOCAL_ID           = 0x21   # KWP-only
+    KWP_READ_DATA_BY_IDENTIFIER         = 0x22   # same as UDS
+    KWP_READ_MEMORY_BY_ADDRESS          = 0x23   # same as UDS
+    KWP_STOP_COMMUNICATION              = 0x82
+    KWP_START_COMMUNICATION             = 0x81
+    KWP_DYNAMICALLY_DEFINE_LOCAL_ID     = 0x2C
+    KWP_WRITE_DATA_BY_LOCAL_ID          = 0x3B
+    KWP_INPUT_OUTPUT_CONTROL_BY_LOCAL_ID = 0x30
+    KWP_START_ROUTINE_BY_LOCAL_ID       = 0x31   # routine by local ID, not DID
+    KWP_STOP_ROUTINE_BY_LOCAL_ID        = 0x32
+    KWP_REQUEST_ROUTINE_RESULTS_BY_LOCAL_ID = 0x33
+    KWP_REQUEST_DOWNLOAD                = 0x34
+    KWP_REQUEST_UPLOAD                  = 0x35
+    KWP_TRANSFER_DATA                   = 0x36
+    KWP_REQUEST_TRANSFER_EXIT           = 0x37
+    KWP_WRITE_DATA_BY_COMMON_ID         = 0x2E
+    KWP_TESTER_PRESENT                  = 0x3E
+
 
 # ── Sub-functions ────────────────────────────────────────────────────
 

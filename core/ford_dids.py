@@ -243,6 +243,56 @@ FORD_DID_REGISTRY: dict[int, FordDID] = {
                                             decoder=_decode_odometer_be),
     DID_FORD_BOOTLOADER_INFO:       FordDID(0x11C1, "Bootloader Info"),
     DID_FORD_MODULE_SPECIFIC:       FordDID(0x1928, "Module-Specific Data Block"),
+
+    # ── Additional ISO + Ford-specific identifiers mined from the
+    # alfa-analysis indexes 2026-06-06. Treat as best-effort labels —
+    # not every module responds to every DID; absence of a response
+    # (NRC 0x31) just means "not implemented on this module."
+    0xF100: FordDID(0xF100, "Manufacturer Identification (Group Start)"),
+    0xF109: FordDID(0xF109, "Calibration Index Offset"),
+    0xF111: FordDID(0xF111, "Programming Counter"),
+    0xF128: FordDID(0xF128, "Software Calibration Set Reference"),
+    0xF155: FordDID(0xF155, "Diagnostic Trouble Code Status Table"),
+    0xF16F: FordDID(0xF16F, "Vehicle Platform Identifier (mfg-specific)"),
+    0xF172: FordDID(0xF172, "Hardware / Software Compatibility Block"),
+    0xF174: FordDID(0xF174, "Module Activation State"),
+    0xF1A8: FordDID(0xF1A8, "Network Configuration Index"),
+    0xF1B9: FordDID(0xF1B9, "Software Application Trace"),
+    0xF1E0: FordDID(0xF1E0, "Ford Extended DID Range Prefix",
+                    notes="Ford uses 0xF1E0-0xF1FF for proprietary extension data"),
+    0xF1FF: FordDID(0xF1FF, "Manufacturer Identification (Group End)"),
+
+    # ── AsBuilt block address range (0xF200-0xFBxx). These ARE valid
+    # 0x22 ReadDataByIdentifier targets on Ford modules, but the payload
+    # is the corresponding factory-config block rather than a single
+    # value. See modules/asbuilt.py for the block decode schemas.
+    0xF200: FordDID(0xF200, "AsBuilt Block (range start)"),
+    0xF300: FordDID(0xF300, "AsBuilt Block — BCM region"),
+    0xF301: FordDID(0xF301, "AsBuilt Block — BCM region"),
+    0xF372: FordDID(0xF372, "AsBuilt Block — IPC region"),
+    0xF400: FordDID(0xF400, "AsBuilt Block — PCM region"),
+    0xF472: FordDID(0xF472, "AsBuilt Block — PCM region"),
+    0xF572: FordDID(0xF572, "AsBuilt Block — RCM region"),
+    0xF58D: FordDID(0xF58D, "AsBuilt Block — RCM detail"),
+    0xF672: FordDID(0xF672, "AsBuilt Block — ABS region"),
+    0xF680: FordDID(0xF680, "AsBuilt Block — ABS detail"),
+    0xF772: FordDID(0xF772, "AsBuilt Block — HVAC region"),
+    0xF800: FordDID(0xF800, "AsBuilt Block — APIM/SYNC region"),
+    0xF81D: FordDID(0xF81D, "AsBuilt Block — APIM detail"),
+    0xF884: FordDID(0xF884, "AsBuilt Block — APIM extended"),
+    0xF8E9: FordDID(0xF8E9, "AsBuilt Block — APIM diagnostic"),
+    0xF900: FordDID(0xF900, "AsBuilt Block — Gateway region"),
+    0xF96F: FordDID(0xF96F, "AsBuilt Block — Gateway routing"),
+    0xF9CB: FordDID(0xF9CB, "AsBuilt Block — Gateway diagnostic"),
+    0xF9E9: FordDID(0xF9E9, "AsBuilt Block — Gateway extended"),
+    0xF9EC: FordDID(0xF9EC, "AsBuilt Block — Gateway extended"),
+    0xF9EE: FordDID(0xF9EE, "AsBuilt Block — Gateway extended"),
+    0xF9FF: FordDID(0xF9FF, "AsBuilt Block — Gateway region end"),
+    0xFB00: FordDID(0xFB00, "Extended AsBuilt — Hybrid/EV region"),
+    0xFB35: FordDID(0xFB35, "Extended AsBuilt — Hybrid/EV detail"),
+    0xFB5F: FordDID(0xFB5F, "Extended AsBuilt — Hybrid/EV detail"),
+    0xFB8D: FordDID(0xFB8D, "Extended AsBuilt — Hybrid/EV detail"),
+    0xFE70: FordDID(0xFE70, "OEM Reserved Block (Ford/FCA shared region)"),
 }
 
 
