@@ -1,9 +1,9 @@
 MAJOR = 2
 MINOR = 6
 PATCH = 4
-BUILD = 6
+BUILD = 7
 
-VERSION = "2.6.4.6"
+VERSION = "2.6.4.7"
 VERSION_SHORT = "2.6.4"
 
 APP_NAME = "Fuse OBD"
