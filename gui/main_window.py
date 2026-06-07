@@ -3,7 +3,7 @@ import sys
 import webbrowser
 from typing import Optional
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QIcon
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QMessageBox, QTabWidget, QStatusBar,
@@ -60,8 +60,17 @@ def _resource_path(name: str) -> str:
 
 
 class FuseMainWindow(QMainWindow):
+    # Worker threads emit this with a no-arg callable to run on the UI
+    # thread (queued connection). QMainWindow has no Tk-style `after`
+    # shim like BasePanel does, so we wire up the same pattern here.
+    _run_in_ui = pyqtSignal(object)
+
     def __init__(self):
         super().__init__()
+        self._run_in_ui.connect(
+            lambda fn: fn(),
+            Qt.ConnectionType.QueuedConnection,
+        )
         self.setWindowTitle(f"{APP_NAME} v{VERSION} — {APP_DESC}")
         self.resize(1200, 750)
         self.setMinimumSize(900, 600)
@@ -267,66 +276,83 @@ class FuseMainWindow(QMainWindow):
     # ── Connection callbacks ──
 
     def _on_connect(self, j2534: J2534):
+        # Adapter is up; the long pole now is HS-CAN init + MS-CAN init +
+        # VIN read, which can take 60-90 seconds on a non-responsive
+        # vehicle (every UDS call eats its full timeout). Run it on a
+        # worker so the UI stays responsive while we probe — otherwise
+        # the window appears frozen and users force-quit.
         self.vehicle = VehicleConnection(j2534)
-        hs_ok = ms_ok = False
-        try:
-            self.vehicle.connect_hs_can()
-            hs_ok = True
-        except Exception as e:
-            warn(self, "HS CAN", f"Could not open HS CAN: {e}")
-        try:
-            self.vehicle.connect_ms_can()
-            ms_ok = True
-        except Exception as e:
-            warn(self, "MS CAN", f"Could not open MS CAN: {e}")
+        self.global_status.setText("Connected — probing vehicle…")
 
-        # Open a streaming session to the Fuse-Web server so every event
-        # and PID poll from here on lands in the user's account history.
-        # No-op when the user isn't signed in or the server is down.
-        try:
-            adapter_name = ""
-            adapter_vendor = ""
-            adapter_port = ""
+        def worker():
+            hs_ok = ms_ok = False
+            hs_err = ms_err = None
             try:
-                dev = j2534.device
-                adapter_name = getattr(dev, "name", "") or ""
-                adapter_vendor = getattr(dev, "vendor", "") or ""
-                adapter_port = getattr(dev, "port", "") or getattr(dev, "host", "") or ""
-            except Exception:
-                pass
-            vehicle_sync.start_session(
-                adapter_name=adapter_name,
-                adapter_vendor=adapter_vendor,
-                adapter_port=adapter_port,
-                protocol="HS-CAN" if hs_ok else ("MS-CAN" if ms_ok else ""),
-            )
-        except Exception:
-            pass
+                self.vehicle.connect_hs_can()
+                hs_ok = True
+            except Exception as e:
+                hs_err = str(e)
+            try:
+                self.vehicle.connect_ms_can()
+                ms_ok = True
+            except Exception as e:
+                ms_err = str(e)
 
-        # Verify communication by reading VIN
-        try:
-            vin = self.vehicle.read_vin()
-            if vin and len(vin) == 17:
-                self.global_status.setText(f"Connected — VIN: {vin}")
-                # Tell the server which vehicle this session belongs
-                # to. The server creates the vehicle row the first
-                # time it sees this VIN under the user's account.
+            # Open a streaming session to the Fuse-Web server so every event
+            # and PID poll from here on lands in the user's account history.
+            # No-op when the user isn't signed in or the server is down.
+            try:
+                adapter_name = ""
+                adapter_vendor = ""
+                adapter_port = ""
                 try:
-                    vehicle_sync.identify_vehicle(vin)
-                    vehicle_sync.emit_event("vin", title=f"VIN identified: {vin}",
-                                            payload={"vin": vin})
+                    dev = j2534.device
+                    adapter_name = getattr(dev, "name", "") or ""
+                    adapter_vendor = getattr(dev, "vendor", "") or ""
+                    adapter_port = getattr(dev, "port", "") or getattr(dev, "host", "") or ""
                 except Exception:
                     pass
-            else:
-                self.global_status.setText("Connected — Vehicle not responding (check ignition is ON)")
-                warn(self, "No Response",
-                     "Adapter connected but vehicle is not responding.\n\n"
-                     "Make sure:\n"
-                     "  • Ignition is ON (engine running for full scan)\n"
-                     "  • OBD connector is fully seated\n"
-                     "  • HS-CAN pins (6 & 14) are functional\n\n"
-                     "The adapter itself is working — the car isn't talking back.")
-        except Exception:
+                vehicle_sync.start_session(
+                    adapter_name=adapter_name,
+                    adapter_vendor=adapter_vendor,
+                    adapter_port=adapter_port,
+                    protocol="HS-CAN" if hs_ok else ("MS-CAN" if ms_ok else ""),
+                )
+            except Exception:
+                pass
+
+            vin = ""
+            vin_error = False
+            try:
+                vin = self.vehicle.read_vin() or ""
+            except Exception:
+                vin_error = True
+
+            self._run_in_ui.emit(lambda: self._on_connect_finished(
+                hs_ok, ms_ok, hs_err, ms_err, vin, vin_error,
+            ))
+
+        import threading
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_connect_finished(self, hs_ok, ms_ok, hs_err, ms_err,
+                              vin, vin_error):
+        """UI-thread callback invoked when the connection probe worker
+        finishes. All Qt widget access (status text, dialogs) belongs here."""
+        if not hs_ok and hs_err:
+            warn(self, "HS CAN", f"Could not open HS CAN: {hs_err}")
+        if not ms_ok and ms_err:
+            warn(self, "MS CAN", f"Could not open MS CAN: {ms_err}")
+
+        if vin and len(vin) == 17:
+            self.global_status.setText(f"Connected — VIN: {vin}")
+            try:
+                vehicle_sync.identify_vehicle(vin)
+                vehicle_sync.emit_event("vin", title=f"VIN identified: {vin}",
+                                        payload={"vin": vin})
+            except Exception:
+                pass
+        elif vin_error:
             tag = " ".join(filter(None, [
                 "HS-CAN" if hs_ok else "",
                 "MS-CAN" if ms_ok else "",
@@ -335,6 +361,15 @@ class FuseMainWindow(QMainWindow):
                 self.global_status.setText(f"Connected ({tag}) — VIN read failed")
             else:
                 self.global_status.setText("Connected — no CAN channels available")
+        else:
+            self.global_status.setText("Connected — Vehicle not responding (check ignition is ON)")
+            warn(self, "No Response",
+                 "Adapter connected but vehicle is not responding.\n\n"
+                 "Make sure:\n"
+                 "  • Ignition is ON (engine running for full scan)\n"
+                 "  • OBD connector is fully seated\n"
+                 "  • HS-CAN pins (6 & 14) are functional\n\n"
+                 "The adapter itself is working — the car isn't talking back.")
 
     def _on_disconnect(self):
         self.monitor_panel.stop_monitor()
