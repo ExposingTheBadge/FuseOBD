@@ -1008,6 +1008,14 @@ class J2534:
         self._next_channel = 0
         self._is_serial = device.is_serial
         self._is_wifi = device.is_wifi
+        # Serializes all access to _stream (serial or TCP). The connect
+        # probe, AI Mechanic tool calls, scanner panel, and DTC panel can
+        # all hit this object concurrently — without a lock they corrupt
+        # each other's bytes on the wire (interleaved AT commands, all-
+        # zero reads where one thread drains the buffer the other is
+        # waiting for). RLock so a thread can nest write_msg+read_msgs.
+        import threading as _threading
+        self._stream_lock = _threading.RLock()
 
         if self._is_serial:
             self._stream = _WinSerial(device.port)
@@ -1313,11 +1321,12 @@ class J2534:
             except Exception:
                 pass
 
-            self._stream.flush()
-            hex_data = payload.hex().upper()
-            self._stream.write((hex_data + "\r").encode("ascii"))
-            import time as _time
-            _time.sleep(0.01)
+            with self._stream_lock:
+                self._stream.flush()
+                hex_data = payload.hex().upper()
+                self._stream.write((hex_data + "\r").encode("ascii"))
+                import time as _time
+                _time.sleep(0.01)
         else:
             msg = self._build_msg(protocol, data, tx_flags=tx_flags)
             num = c_ulong(1)
@@ -1338,34 +1347,39 @@ class J2534:
                     pass
             deadline = _time.time() + timeout / 1000.0
             results = []
-            while _time.time() < deadline and len(results) < count:
-                data = self._stream.read(256, max(50, timeout // 2))
-                if data:
-                    text = data.decode("ascii", errors="replace").strip()
-                    if text and ">" not in text and "BUS" not in text.upper() \
-                       and "ERROR" not in text.upper() and "NO DATA" not in text.upper():
-                        cleaned = text.replace("\r", "").replace("\n", "").replace(" ", "")
-                        if cleaned and len(cleaned) >= 2:
-                            try:
-                                raw = bytes.fromhex(cleaned)
-                                _log(f'CAN RX raw: {cleaned}')
-                                # ELM327 in AT SP 6 mode strips ISO-TP PCI from
-                                # received frames automatically. The raw data is
-                                # the actual payload (service response bytes).
-                                payload = raw
-                                rx_id = ch.get("rx_id")
-                                if rx_id is not None:
-                                    frame = struct.pack(">I", rx_id & 0x7FF) + payload
-                                else:
-                                    frame = payload
-                                rx_disp = f"{rx_id:06X}" if isinstance(rx_id, int) else "----"
-                                _log(f'CAN RX: rx_id={rx_disp} payload={payload.hex().upper()}')
-                                results.append(frame)
-                            except ValueError:
-                                pass
-                    elif "NO DATA" in text.upper():
-                        _log(f'CAN RX: NO DATA')
-                _time.sleep(0.005)
+            # Hold the stream lock for the whole read window. The ELM is
+            # half-duplex — any concurrent write would inject a new
+            # command into the same response we're parsing.
+            with self._stream_lock:
+                while _time.time() < deadline and len(results) < count:
+                    data = self._stream.read(256, max(50, timeout // 2))
+                    if data:
+                        text = data.decode("ascii", errors="replace").strip()
+                        if text and ">" not in text and "BUS" not in text.upper() \
+                           and "ERROR" not in text.upper() and "NO DATA" not in text.upper():
+                            cleaned = text.replace("\r", "").replace("\n", "").replace(" ", "")
+                            if cleaned and len(cleaned) >= 2:
+                                try:
+                                    raw = bytes.fromhex(cleaned)
+                                    _log(f'CAN RX raw: {cleaned}')
+                                    # ELM327 in AT SP 6 mode strips ISO-TP PCI
+                                    # from received frames automatically. The
+                                    # raw data is the actual payload (service
+                                    # response bytes).
+                                    payload = raw
+                                    rx_id = ch.get("rx_id")
+                                    if rx_id is not None:
+                                        frame = struct.pack(">I", rx_id & 0x7FF) + payload
+                                    else:
+                                        frame = payload
+                                    rx_disp = f"{rx_id:06X}" if isinstance(rx_id, int) else "----"
+                                    _log(f'CAN RX: rx_id={rx_disp} payload={payload.hex().upper()}')
+                                    results.append(frame)
+                                except ValueError:
+                                    pass
+                        elif "NO DATA" in text.upper():
+                            _log(f'CAN RX: NO DATA')
+                    _time.sleep(0.005)
             if not results:
                 _log(f'CAN RX: timeout (no response)')
             return results
@@ -1440,24 +1454,31 @@ class J2534:
     # ── ELM327 protocol helpers ──
 
     def _elm_cmd(self, stream, cmd: str, timeout_ms: int = 1000) -> str:
-        """Send an AT command and return the response (stripped)."""
-        stream.flush()
-        stream.write((cmd + "\r").encode("ascii"))
-        import time as _time
-        result = bytearray()
-        deadline = _time.time() + timeout_ms / 1000.0
-        while _time.time() < deadline:
-            chunk = stream.read(256, 50)
-            if chunk:
-                result.extend(chunk)
-                text = bytes(result).decode("ascii", errors="replace")
-                if ">" in text:
+        """Send an AT command and return the response (stripped).
+
+        Holds _stream_lock for the full request/response so concurrent
+        callers can't interleave bytes on the wire. The ELM327 is
+        half-duplex (single command, single `>` prompt) — anything
+        else corrupts both transactions.
+        """
+        with self._stream_lock:
+            stream.flush()
+            stream.write((cmd + "\r").encode("ascii"))
+            import time as _time
+            result = bytearray()
+            deadline = _time.time() + timeout_ms / 1000.0
+            while _time.time() < deadline:
+                chunk = stream.read(256, 50)
+                if chunk:
+                    result.extend(chunk)
+                    text = bytes(result).decode("ascii", errors="replace")
+                    if ">" in text:
+                        break
+                    _time.sleep(0.01)
+                elif result:
                     break
-                _time.sleep(0.01)
-            elif result:
-                break
-            else:
-                _time.sleep(0.01)
+                else:
+                    _time.sleep(0.01)
         text = bytes(result).decode("ascii", errors="replace")
         # Strip the command echo and prompt, keep meaningful lines
         lines = []

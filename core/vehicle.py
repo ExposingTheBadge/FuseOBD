@@ -143,31 +143,58 @@ class VehicleConnection:
         self.vehicle_info.modules = found
         return found
 
-    def read_vin(self) -> str:
+    def read_vin(self, time_budget_s: float = 15.0) -> str:
         # ── Method 1: UDS DIDs (primary — don't disrupt CAN state first) ──
+        # Time-bound the whole probe. On a non-responsive vehicle (non-Ford
+        # or ignition off) every UDS exchange burns its full timeout, so
+        # the worst-case naive iteration (4 modules × 3 sessions × 3 DIDs)
+        # blocks for ~110 s — long enough that the user assumes the app
+        # hung. Bail at the first deadline and let the caller surface the
+        # "No Response" dialog promptly.
+        deadline = time.monotonic() + time_budget_s
         vin_dids = [0xF190, 0xF110, 0xF18C]
         sessions = [UDSSession.EXTENDED, UDSSession.FORD_DIAG, UDSSession.DEFAULT]
         priority = ("PCM", "IPC", "BCM", "GWM")
         for module in FORD_MODULES:
             if module.abbreviation not in priority:
                 continue
+            if time.monotonic() >= deadline:
+                break
+            session_succeeded = False
             for session in sessions:
-                for did in vin_dids:
+                if time.monotonic() >= deadline:
+                    break
+                try:
+                    client = self.get_uds_client(module)
                     try:
-                        client = self.get_uds_client(module)
+                        client.diagnostic_session(session)
+                    except Exception:
+                        # If this session isn't supported here, every DID
+                        # under it will fail too — skip to the next session
+                        # rather than retrying the same session per DID.
+                        continue
+                    session_succeeded = True
+                    for did in vin_dids:
+                        if time.monotonic() >= deadline:
+                            break
                         try:
-                            client.diagnostic_session(session)
+                            data = client.read_data_by_id(did)
+                            vin = data.decode("ascii", errors="replace").strip("\x00").strip()
+                            if len(vin) == 17:
+                                self.vehicle_info.vin = vin
+                                return vin
                         except Exception:
                             continue
-                        data = client.read_data_by_id(did)
-                        vin = data.decode("ascii", errors="replace").strip("\x00").strip()
-                        if len(vin) == 17:
-                            self.vehicle_info.vin = vin
-                            return vin
-                    except Exception:
-                        continue
+                except Exception:
+                    continue
+            # If no session succeeded on this module, it almost certainly
+            # isn't reachable at all on this bus — don't keep retrying.
+            if not session_succeeded:
+                continue
 
         # ── Method 2: OBD Mode 09 PID 02 (fallback — try last since it resets CAN state) ──
+        if time.monotonic() >= deadline:
+            return ""
         try:
             data = self._obd_request(b"\x09\x02")
             if data and len(data) > 3 and data[0:2] == b"\x49\x02":
