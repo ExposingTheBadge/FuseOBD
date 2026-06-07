@@ -73,6 +73,65 @@ def enumerate_usb() -> list[UsbDevice]:
     except OSError:
         pass
 
+    # ── FTDI bus-child port map: { (vid_pid, parent_serial) -> COMx } ──
+    # FTDI's CDM driver enumerates as a two-layer device tree: the
+    # parent USB device (under Enum\USB) has Service=FTDIBUS but NO
+    # PortName, while a child PDO under Enum\FTDIBUS holds the actual
+    # COM port. Without walking FTDIBUS we wrongly report "DRIVER
+    # MISSING" for every FTDI-based adapter (OBDLink SX/EX, etc.) even
+    # when the driver is installed and working.
+    #
+    # FTDIBUS child key format: 'VID_0403+PID_6015+<serial>A'
+    # The parent USB instance key is just '<serial>' (no trailing 'A').
+    # We correlate by (vid_pid, serial) so multiple FT-family adapters
+    # plugged in simultaneously don't get mixed up.
+    ftdi_ports: dict[tuple[str, str], str] = {}
+    try:
+        fk = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                            r"SYSTEM\CurrentControlSet\Enum\FTDIBUS",
+                            0, winreg.KEY_READ)
+        k = 0
+        while True:
+            try:
+                child_key = winreg.EnumKey(fk, k); k += 1
+            except OSError:
+                break
+            parts = child_key.split("+")
+            if len(parts) < 3 or not parts[0].startswith("VID_") or not parts[1].startswith("PID_"):
+                continue
+            vid_pid = f"{parts[0]}&{parts[1]}"
+            parent_serial = parts[2][:-1] if parts[2].endswith("A") else parts[2]
+            try:
+                ck = winreg.OpenKey(fk, child_key, 0, winreg.KEY_READ)
+            except OSError:
+                continue
+            m = 0
+            while True:
+                try:
+                    inst_key = winreg.EnumKey(ck, m); m += 1
+                except OSError:
+                    break
+                try:
+                    inst = winreg.OpenKey(ck, inst_key, 0, winreg.KEY_READ)
+                except OSError:
+                    continue
+                try:
+                    dp = winreg.OpenKey(inst, "Device Parameters", 0, winreg.KEY_READ)
+                    try:
+                        port = winreg.QueryValueEx(dp, "PortName")[0]
+                        if port:
+                            ftdi_ports[(vid_pid, parent_serial)] = port
+                    except OSError:
+                        pass
+                    winreg.CloseKey(dp)
+                except OSError:
+                    pass
+                winreg.CloseKey(inst)
+            winreg.CloseKey(ck)
+        winreg.CloseKey(fk)
+    except OSError:
+        pass
+
     out: list[UsbDevice] = []
     try:
         enum_key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
@@ -136,6 +195,12 @@ def enumerate_usb() -> list[UsbDevice]:
                     pass
 
                 winreg.CloseKey(inst)
+
+                # FTDI fallback: parent USB key has no PortName because the
+                # COM port lives under Enum\FTDIBUS. Correlate by
+                # (vid_pid, instance serial) — see ftdi_ports build above.
+                if not com_port and svc and svc.upper() == "FTDIBUS":
+                    com_port = ftdi_ports.get((vid_pid_key, instance_key))
 
                 vid, pid = _parse_vid_pid(vid_pid_key)
                 out.append(UsbDevice(

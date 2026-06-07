@@ -774,7 +774,12 @@ class AIMechanicWindow(QMainWindow):
             self.issues_list.addItem(item)
         self.issues_count.setText(str(len(issues)))
 
-    def _open_issue_detail(self, item: QListWidgetItem):
+    def _open_issue_detail(self, item: Optional[QListWidgetItem]):
+        # itemActivated can fire with no item when the list is empty
+        # (e.g. Enter pressed on a freshly-cleared list) — guard before
+        # touching item.data() or we crash with AttributeError.
+        if item is None:
+            return
         issue: Issue = item.data(Qt.ItemDataRole.UserRole)
         if issue is None:
             return
