@@ -104,58 +104,66 @@ class VehicleConnection:
         return client
 
     def scan_modules(self, callback=None) -> list[ModuleInfo]:
+        # Pre-2008 Ford modules (CD3, U-platform, etc.) reject
+        # DiagnosticSessionControl with NRC 0x11 — but they happily
+        # answer $22 reads in the implicit default session. Skip DSC
+        # entirely and use a $22 0200 ping to detect presence: a
+        # positive response OR a NRC both mean "module is alive on
+        # the bus." Only a true timeout = absent.
         found = []
         for i, module in enumerate(FORD_MODULES):
             if callback:
                 callback(module.name, i, len(FORD_MODULES))
             try:
                 client = self.get_uds_client(module)
-                client.diagnostic_session(UDSSession.FORD_DIAG)
-                info = ModuleInfo(module=module, present=True)
-
-                # ISO 14229 standard ident DIDs — empty on most Ford modules
-                # but populated on standards-compliant ones (SYNC4/Sync 3+).
-                for did, attr in (
-                    (0xF188, "software_pn"),
-                    (0xF191, "hardware_pn"),
-                    (0xF187, "part_number"),
-                ):
-                    try:
-                        data = client.read_data_by_id(did)
-                        setattr(info, attr, data.decode("ascii", errors="replace").strip())
-                    except (UDSException, TimeoutError):
-                        pass
-
-                # Ford-specific ident DIDs — preferred on PCM and most Ford
-                # body modules. Only overwrite the ISO fields if they were
-                # empty (don't clobber genuine standards-compliant data).
-                try:
-                    data = client.read_data_by_id(DID_FORD_SOFTWARE_PART_NUMBER)
-                    if data and not info.software_pn:
-                        info.software_pn = data.hex().upper()
-                except (UDSException, TimeoutError):
-                    pass
-                try:
-                    data = client.read_data_by_id(DID_FORD_CALIBRATION_ID)
-                    if data:
-                        info.calibration_id = data.hex().upper()
-                except (UDSException, TimeoutError):
-                    pass
-                try:
-                    data = client.read_data_by_id(DID_FORD_ASSEMBLY_PART_NUMBER)
-                    if data:
-                        info.assembly_pn = data.decode("ascii", errors="replace").strip("\x00").strip()
-                except (UDSException, TimeoutError):
-                    pass
-
-                found.append(info)
             except Exception:
-                client_to_remove = self._uds_clients.pop((module.network, module.address), None)
-                if client_to_remove:
-                    try:
-                        client_to_remove.disconnect()
-                    except Exception:
-                        pass
+                continue
+
+            module_alive = False
+            try:
+                client.read_data_by_id(0x0200)  # Ford "are you alive?" ping
+                module_alive = True
+            except UDSException:
+                # NRC means the module IS there, it just doesn't expose
+                # DID 0x0200. That's still presence.
+                module_alive = True
+            except (TimeoutError, Exception):
+                pass
+
+            if not module_alive:
+                self._uds_clients.pop((module.network, module.address), None)
+                continue
+
+            info = ModuleInfo(module=module, present=True)
+
+            # Harvest identity. Try Ford-specific DIDs first (these
+            # work on older platforms where ISO 14229 doesn't), then
+            # fall back to ISO standard DIDs for newer modules.
+            for did, attr, decoder in (
+                (DID_FORD_ASSEMBLY_PART_NUMBER, "assembly_pn",
+                    lambda b: b.decode("ascii", errors="replace").strip("\x00").strip()),
+                (DID_FORD_CALIBRATION_ID, "calibration_id",
+                    lambda b: b.hex().upper()),
+                (DID_FORD_SOFTWARE_PART_NUMBER, "software_pn",
+                    lambda b: b.hex().upper()),
+                (0xE610, "part_number",   # Module HW P/N (Ford 8-byte ASCII)
+                    lambda b: b.decode("ascii", errors="replace").strip("\x00").strip()),
+                # ISO 14229 fallbacks
+                (0xF187, "part_number",
+                    lambda b: b.decode("ascii", errors="replace").strip()),
+                (0xF188, "software_pn",
+                    lambda b: b.decode("ascii", errors="replace").strip()),
+                (0xF191, "hardware_pn",
+                    lambda b: b.decode("ascii", errors="replace").strip()),
+            ):
+                try:
+                    data = client.read_data_by_id(did)
+                    if data and not getattr(info, attr, None):
+                        setattr(info, attr, decoder(data))
+                except (UDSException, TimeoutError, Exception):
+                    pass
+
+            found.append(info)
         self.vehicle_info.modules = found
         return found
 
@@ -479,6 +487,73 @@ class VehicleConnection:
         unique = [s for s in out if not (s in seen or seen.add(s))]
         self.vehicle_info.cal_ids = unique
         return unique
+
+    def read_obd_pid_broadcast(self, pid: int, timeout_ms: int = 1500
+                                ) -> Optional[bytes]:
+        """SAE J1979 Mode 01 PID XX broadcast read. Returns the raw
+        payload bytes (without the 41 XX service-echo header), or
+        None if no ECU responded. Works on every OBD-II compliant
+        vehicle and is the right path for "live data" PIDs that
+        UDS Mode 22 0xF4XX can't reach on pre-2008 modules."""
+        if not (0 <= pid <= 0xFF):
+            return None
+        raw = self._obd_request(bytes([0x01, pid]), timeout_ms=timeout_ms)
+        if not raw:
+            return None
+        # Strip the response service-echo header (41 XX). Multiple
+        # ECUs may respond; take the first non-empty payload.
+        marker = bytes([0x41, pid])
+        idx = raw.find(marker)
+        if idx < 0:
+            return None
+        payload = raw[idx + 2:]
+        # Trim trailing zero padding so callers see exactly the
+        # bytes the ECU emitted.
+        return payload.rstrip(b"\x00") or payload
+
+    def read_obd_dtcs_broadcast(self, mode: int = 0x03,
+                                  timeout_ms: int = 2000) -> list[str]:
+        """SAE J1979 Mode 03 (stored DTCs) / Mode 07 (pending) / Mode
+        0A (permanent) broadcast read. Returns DTC code strings like
+        "P0420". Works on every OBD-II compliant vehicle since 1996 —
+        the fallback when UDS Mode 19 ReadDTCInformation isn't
+        supported (typical of pre-2008 Ford modules)."""
+        if mode not in (0x03, 0x07, 0x0A):
+            raise ValueError("mode must be 0x03, 0x07, or 0x0A")
+        raw = self._obd_request(bytes([mode]), timeout_ms=timeout_ms)
+        if not raw:
+            return []
+        # Response format: 43 <count> <dtc1_hi> <dtc1_lo> <dtc2_hi> ...
+        # (Mode 07 → response 47; Mode 0A → response 4A)
+        resp_byte = mode + 0x40
+        codes: list[str] = []
+        cursor = 0
+        from modules.dtc import decode_dtc_bytes
+        while cursor < len(raw):
+            # Find the next response service byte (43/47/4A). Some
+            # ELM/STN frames concatenate multiple ECU responses.
+            idx = raw.find(bytes([resp_byte]), cursor)
+            if idx < 0:
+                break
+            cursor = idx + 1
+            if cursor >= len(raw):
+                break
+            count = raw[cursor]
+            cursor += 1
+            for _ in range(count):
+                if cursor + 2 > len(raw):
+                    break
+                pair = raw[cursor:cursor + 2]
+                cursor += 2
+                if pair == b"\x00\x00":
+                    continue
+                code = decode_dtc_bytes(pair)
+                if code:
+                    codes.append(code)
+        # Deduplicate while preserving order (same DTC may come back
+        # from multiple ECUs).
+        seen = set()
+        return [c for c in codes if not (c in seen or seen.add(c))]
 
     def read_cvns(self, timeout_ms: int = 1500) -> list[str]:
         """Mode 09 PID 06 — fetch 4-byte Calibration Verification

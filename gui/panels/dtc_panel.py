@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
 )
 
 from core.protocols import FORD_MODULES
-from modules.dtc import DTCReader, ModuleDTCs
+from modules.dtc import DTC, DTCReader, ModuleDTCs
 from modules.vehicle_info import decode_vin, get_vehicle_image_url
 from modules.vehicle_sync import sync as vehicle_sync
 from data.dtc_definitions import lookup_dtc
@@ -134,6 +134,36 @@ class DTCPanel(BasePanel):
                 self.after(0, lambda: self._load_vehicle_info(vin))
 
             all_dtcs: list[ModuleDTCs] = []
+
+            # SAE J1979 broadcast pass first. Mode 03 reads stored
+            # emissions DTCs from every OBD-II-compliant ECU at once
+            # — works on every '96+ vehicle including pre-2008 Ford
+            # platforms whose modules NRC UDS Mode 19 (per-module
+            # ReadDTCInformation). Surface the result as a synthetic
+            # "OBD-II" group so the user sees them even when the
+            # per-module UDS pass below returns nothing.
+            try:
+                obd_codes = vehicle.read_obd_dtcs_broadcast(0x03)
+                if obd_codes:
+                    obd_dtcs = [DTC(code=c, status=0x08, raw_bytes=b"")
+                                for c in obd_codes]
+                    all_dtcs.append(ModuleDTCs(
+                        module_name="OBD-II (Mode 03 stored)",
+                        module_abbrev="OBD",
+                        dtcs=obd_dtcs,
+                    ))
+                    for d in obd_dtcs:
+                        try:
+                            vehicle_sync.emit_event(
+                                "dtc", module="OBD",
+                                code=d.code, title="Stored",
+                                payload={"status": "STORED", "source": "mode03"},
+                            )
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
             wanted = ("PCM", "TCM", "ABS", "RCM", "IPC", "BCM", "EPAS", "HVAC",
                       "ACM", "APIM", "DDM", "PDM", "PAM", "GWM", "TPMS", "HCM",
                       "PSCM", "ACC", "FSCM")

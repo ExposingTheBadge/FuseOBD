@@ -53,7 +53,11 @@ class ModuleDTCs:
 
 
 def decode_dtc_bytes(raw: bytes) -> str:
-    if len(raw) < 3:
+    """Decode a 2- or 3-byte DTC field into its ASCII code (e.g.
+    'P0420'). Both lengths are valid wire formats — UDS Mode 19 wraps
+    a 1-byte status onto the end (so it's 3B), while SAE J1979 Mode
+    03 / 07 / 0A return the 2-byte code alone."""
+    if len(raw) < 2:
         return ""
     byte1 = raw[0]
     byte2 = raw[1]

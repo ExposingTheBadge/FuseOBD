@@ -240,20 +240,37 @@ class PIDMonitor:
             pids_to_read = list(self.active_pids)
 
         for pid in pids_to_read:
-            module = self._find_module(pid.module)
-            if not module:
-                continue
-            try:
-                client = self.vehicle.get_uds_client(module)
-                data = client.read_data_by_id(pid.did)
-                if data:
+            data = None
+            # DIDs in the 0xF4XX range are the UDS Mode 22 mapping of
+            # SAE J1979 Mode 01 PIDs (DID 0xF40C == Mode 01 PID 0x0C,
+            # etc.). On older Ford modules — and most non-Ford
+            # vehicles — the directed UDS read to a specific module
+            # address returns NRC, but the Mode 01 broadcast to 0x7DF
+            # always works because that's the OBD-II compliance path.
+            # Try broadcast first for any F4XX PID.
+            if 0xF400 <= pid.did <= 0xF4FF:
+                try:
+                    data = self.vehicle.read_obd_pid_broadcast(pid.did & 0xFF)
+                except Exception:
+                    data = None
+            if data is None:
+                module = self._find_module(pid.module)
+                if module is None:
+                    continue
+                try:
+                    client = self.vehicle.get_uds_client(module)
+                    data = client.read_data_by_id(pid.did)
+                except (UDSException, TimeoutError, Exception):
+                    data = None
+            if data:
+                try:
                     raw, value = decode_pid_value(pid, data)
                     reading = PIDReading(
                         pid=pid, raw_value=raw, value=value, timestamp=time.time()
                     )
                     results[pid.did] = reading
-            except (UDSException, TimeoutError, Exception):
-                pass
+                except Exception:
+                    pass
 
         with self._lock:
             self.readings.update(results)
