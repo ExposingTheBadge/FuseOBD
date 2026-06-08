@@ -1117,7 +1117,21 @@ class J2534:
                         self._elm_init(self._stream)
                         resp = self._elm_cmd(self._stream, "ATI", timeout_ms=600)
                         _log(f'ATI response: {repr(resp[:20])}')
-                        if resp and len(resp) > 2 and "?" not in resp[:4]:
+                        # Require a real ELM-family banner. The old check
+                        # ("len > 2 and no '?' in first 4 chars") accepted
+                        # junk like '\x00\x00\xef\xbf\xbd' from a baud
+                        # mismatch and then everything downstream failed
+                        # because we were committed to the wrong baud.
+                        # All valid responses include one of these markers:
+                        #   "ELM327 v1.5" / "ELM327 v2.3"
+                        #   "STN1170 v4.3.2" / "STN2120 v..."
+                        #   "OBDLink ..."
+                        resp_upper = (resp or "").upper()
+                        looks_like_elm = any(
+                            marker in resp_upper
+                            for marker in ("ELM327", "STN", "OBDLINK", "OBDII", "ELM")
+                        )
+                        if looks_like_elm and "?" not in resp[:4]:
                             _log(f'Baud {baud} OK')
                             J2534._last_baud = baud
                             self._elm_init(self._stream)
