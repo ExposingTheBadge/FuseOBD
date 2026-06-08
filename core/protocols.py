@@ -360,8 +360,11 @@ FORD_MODULES = [
     FordModule("Driver Seat Module", "DSM", 0x40, FordNetwork.MS_CAN, verified=True,
                description="Power-seat memory; previously listed as SCMD"),
 
-    # ── Network gateway (HS-CAN) ──
-    FordModule("Gateway Module A", "GWM", 0x60, FordNetwork.HS_CAN, verified=True),
+    # ── HS↔MS bridge (the IC on CD3/C170/U-platform doubles as the
+    # network gateway, exposed at 0x760 on HS-CAN AND at 0x720 on
+    # MS-CAN — same physical module, two diagnostic doorways). On
+    # later platforms (Gen3+) this address is a dedicated GWM. ──
+    FordModule("Instrument Cluster (HS gateway)", "IC", 0x60, FordNetwork.HS_CAN, verified=True),
 
     # ── SYNC / infotainment ──
     # Verified: APIM is on HS-CAN at 0x7C0, NOT MS-CAN at 0x773 as previously listed.

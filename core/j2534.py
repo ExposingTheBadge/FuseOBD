@@ -1209,9 +1209,18 @@ class J2534:
                 if baudrate == 500000:
                     self._elm_cmd(self._stream, "ATSP6", 600)   # 11-bit / 500k
                 elif baudrate == 125000:
-                    # User Protocol B configured for 125k MS-CAN. The "ON"
-                    # activation lines were the missing piece — without them
-                    # the PPs are written but never applied.
+                    # MS-CAN (Ford pins 3+11 @ 125 kbps). Two-stage:
+                    #   1. Program User Protocol B's CAN parameters via PPs
+                    #      (PP 2A/2C/2D — bit timing and ISO 15765 framing).
+                    #      Each PP needs its companion "ON" line to commit.
+                    #   2. ATSP B to actually SELECT the protocol. The old
+                    #      code used ATTPB ("try"), which probes the bus but
+                    #      doesn't commit — so the PPs were programmed but
+                    #      the adapter stayed on whatever protocol was last
+                    #      set (usually ATSP6 / HS-CAN), and the vLinker FS
+                    #      never rerouted its internal HS/MS pin relay.
+                    #      Result: every MS-CAN address returned CAN ERROR
+                    #      even though the PPs looked right in the log.
                     for cmd in (
                         "ATPP2ASV38",
                         "ATPP2AON",
@@ -1219,7 +1228,7 @@ class J2534:
                         "ATPP2CON",
                         "ATPP2DSV04",
                         "ATPP2DON",
-                        "ATTPB",
+                        "ATSPB",
                     ):
                         self._elm_cmd(self._stream, cmd, 400)
                 self._current_can_baud = baudrate
