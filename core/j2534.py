@@ -1506,6 +1506,40 @@ class J2534:
             lines.append(line)
         return "\n".join(lines).strip()
 
+    def _elm_read_until_prompt(self, stream, timeout_ms: int = 1000) -> str:
+        """Read from the ELM until the `>` prompt or timeout. WRITES
+        NOTHING. Use this when you've already written a request via
+        raw stream.write() and just need to collect the response —
+        unlike _elm_cmd, which always writes a CR first (sending a
+        bare CR to the ELM means "retransmit last command", which
+        corrupts request/response pairing during multi-step flows).
+        """
+        import time as _time
+        with self._stream_lock:
+            result = bytearray()
+            deadline = _time.time() + timeout_ms / 1000.0
+            while _time.time() < deadline:
+                chunk = stream.read(256, 50)
+                if chunk:
+                    result.extend(chunk)
+                    text = bytes(result).decode("ascii", errors="replace")
+                    if ">" in text:
+                        break
+                    _time.sleep(0.01)
+                elif result:
+                    break
+                else:
+                    _time.sleep(0.01)
+        text = bytes(result).decode("ascii", errors="replace")
+        # Tidy: strip prompt, blank lines, "OK"
+        lines = []
+        for line in text.replace("\r", "\n").split("\n"):
+            line = line.strip()
+            if not line or line == ">" or line == "OK":
+                continue
+            lines.append(line)
+        return "\n".join(lines).strip()
+
     def _elm_init(self, stream):
         """Initialize the adapter with the same sequence the diag-reference
         binary uses (decompiled FUN_0054f190 / FUN_005491f0). The wide 0x7xx

@@ -300,7 +300,13 @@ class VehicleConnection:
         """Send `0100` (Mode 01 PID 00) to wake the OBD-II compliance
         listener. Cached: re-runs only if the previous wake is older
         than 30 s, since once an ECU has been woken it stays awake as
-        long as we keep talking to it."""
+        long as we keep talking to it.
+
+        `0100` is a multi-ECU broadcast (both PCM and TCM typically
+        answer) so we do NOT append the STN message-count suffix here
+        — that would tell the adapter to return after the first reply
+        while the bus is still carrying the second one, garbling the
+        next request."""
         import time
         now = time.monotonic() * 1000.0
         if now - self._obd_woken_at_ms < 30000.0:
@@ -312,11 +318,11 @@ class VehicleConnection:
             # Mark headers as dirty for the j2534's start_msg_filter cache.
             self.j2534._last_sh = None
             self.j2534._last_cra = None
-            wake = "01001" if self._is_stn_class() else "0100"
-            self.j2534._stream.write(wake.encode() + b"\r")
-            time.sleep(0.05)
-            # 600 ms is enough for both PCM and TCM to answer.
-            self.j2534._elm_cmd(self.j2534._stream, "", 600)
+            self.j2534._stream.write(b"0100\r")
+            # 600 ms is enough for both PCM and TCM to answer; we just
+            # READ the response — do not send another CR (a bare CR
+            # tells the ELM to retransmit, which corrupts pairing).
+            self.j2534._elm_read_until_prompt(self.j2534._stream, 600)
             self._obd_woken_at_ms = now
         except Exception:
             # Wake is best-effort. If it failed, the caller will see
@@ -341,25 +347,26 @@ class VehicleConnection:
             self.j2534._elm_cmd(self.j2534._stream, "ATAR", 200)
             self.j2534._last_sh = None
             self.j2534._last_cra = None
-            import time
             hex_cmd = payload.hex().upper()
-            if self._is_stn_class():
-                # Append the STN message-count digit. "1" is correct
-                # for single-ECU responses (Mode 09 PIDs); for multi-
-                # ECU PIDs like Mode 01 supported-PIDs broadcasts you'd
-                # want a higher number, but Mode 09 is single-responder
-                # for the addressed PID so "1" is right here.
+            # STN message-count suffix — only safe for single-responder
+            # PIDs like Mode 09 02/04/06 (only PCM answers). NOT safe
+            # for Mode 01 broadcasts (PCM + TCM both reply).
+            mode = payload[0] if payload else 0
+            if self._is_stn_class() and mode == 0x09:
                 hex_cmd = hex_cmd + "1"
             self.j2534._stream.write(hex_cmd.encode() + b"\r")
-            time.sleep(0.05)
-            resp = self.j2534._elm_cmd(self.j2534._stream, "", timeout_ms)
+            # Read directly from the stream — do NOT use _elm_cmd("",…)
+            # which writes a bare CR (ELM retransmit), corrupting the
+            # response we're trying to collect.
+            resp = self.j2534._elm_read_until_prompt(
+                self.j2534._stream, timeout_ms,
+            )
             if not resp:
                 return None
-            # Strip whitespace, header echoes, and the ELM prompt char
-            # so we can hex-decode cleanly. Multi-frame ISO-TP responses
-            # arrive as several lines; concatenate.
+            # Strip whitespace and the ELM prompt char so we can hex-
+            # decode cleanly. Multi-frame ISO-TP responses arrive as
+            # several lines; concatenate.
             cleaned = resp.upper().replace(" ", "").replace("\n", "").replace("\r", "")
-            # Filter to hex chars only — drops "STOPPED", "?", etc.
             cleaned = "".join(c for c in cleaned if c in "0123456789ABCDEF")
             if not cleaned:
                 return None
