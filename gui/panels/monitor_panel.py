@@ -146,6 +146,18 @@ class MonitorPanel(BasePanel):
             if pid:
                 self.monitor.add_pid(pid)
 
+        # If nothing was selected, seed a small useful default set so
+        # the user gets data immediately instead of an empty panel.
+        if not self.monitor.active_pids:
+            defaults = {0xF40C, 0xF40D, 0xF405, 0xF411, 0xF404, 0xF410, 0xF42F}
+            for pid in STANDARD_PIDS:
+                if pid.did in defaults:
+                    self.monitor.add_pid(pid)
+                    if not self._live_has(pid.name):
+                        item = QTreeWidgetItem([pid.name, "--", "--", pid.unit])
+                        item.setData(0, Qt.ItemDataRole.UserRole, f"live_{pid.did:04X}")
+                        self.live_tree.addTopLevelItem(item)
+
         if not self.monitor.active_pids:
             self.status_label.setText("Add PIDs to monitor first")
             return

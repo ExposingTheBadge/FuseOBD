@@ -269,6 +269,14 @@ class PIDMonitor:
                         pid=pid, raw_value=raw, value=value, timestamp=time.time()
                     )
                     results[pid.did] = reading
+                    # Emit incrementally so the UI updates as each PID
+                    # comes back rather than waiting for the entire
+                    # sweep. With 50+ PIDs at ~1s ATST per request a
+                    # full cycle takes ~minute; batched callback made
+                    # the panel look dead.
+                    if self._callback:
+                        try: self._callback({pid.did: reading})
+                        except Exception: pass
                 except Exception:
                     pass
 
@@ -278,9 +286,10 @@ class PIDMonitor:
 
     def _monitor_loop(self):
         while self._running:
-            readings = self.read_once()
-            if self._callback and readings:
-                self._callback(readings)
+            self.read_once()
+            # read_once now fires self._callback per PID as data arrives;
+            # don't re-emit the full batch here or every row would
+            # rewrite twice per cycle.
             time.sleep(self._interval)
 
     def _find_module(self, abbrev: str) -> Optional[FordModule]:

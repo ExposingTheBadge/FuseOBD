@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
 
 from core.protocols import FORD_MODULES
 from modules.asbuilt import AsBuiltReader, ModuleAsBuilt
-from gui.qt_helpers import BasePanel, run_thread, warn, confirm, error
+from gui.qt_helpers import BasePanel, CancelToken, run_thread, warn, confirm, error
 
 
 class AsBuiltPanel(BasePanel):
@@ -15,6 +15,7 @@ class AsBuiltPanel(BasePanel):
         super().__init__(parent)
         self.get_vehicle = get_vehicle
         self.asbuilt_data: list[ModuleAsBuilt] = []
+        self._cancel: CancelToken | None = None
         self._build_ui()
 
     def _build_ui(self):
@@ -36,6 +37,12 @@ class AsBuiltPanel(BasePanel):
         self.progress = QProgressBar()
         self.progress.setFixedWidth(220)
         tb.addWidget(self.progress)
+
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.clicked.connect(self._cancel_read)
+        tb.addWidget(self.cancel_btn)
+
         tb.addStretch(1)
         v.addLayout(tb)
 
@@ -63,7 +70,10 @@ class AsBuiltPanel(BasePanel):
         if not vehicle:
             return
         self.read_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(True)
         self.progress.setValue(0)
+        self._cancel = CancelToken()
+        token = self._cancel
 
         def thread():
             try:
@@ -74,17 +84,37 @@ class AsBuiltPanel(BasePanel):
                     self.after(0, lambda: self.progress.setValue(pct))
                     self.after(0, lambda: self.status_label.setText(f"Reading {name}..."))
 
-                self.asbuilt_data = reader.read_all_modules(callback=progress_cb)
+                # Restrict the read to modules that actually answered on
+                # the bus. Without this we shotgun all 55 candidate
+                # addresses; on a CD3 with ~6 live modules that wastes
+                # ~5 minutes of NRC waits.
+                if not vehicle.vehicle_info.modules and not token.cancelled:
+                    self.after(0, lambda: self.status_label.setText(
+                        "Discovering modules on the bus..."))
+                    vehicle.scan_modules(cancel=token)
+                discovered = [info.module for info in vehicle.vehicle_info.modules]
+
+                self.asbuilt_data = reader.read_all_modules(
+                    callback=progress_cb, modules=discovered, cancel=token)
                 self.after(0, self._populate_module_list)
-                self.after(0, lambda: self.status_label.setText(
-                    f"Read {len(self.asbuilt_data)} modules"))
+                if token.cancelled:
+                    msg = f"Cancelled — {len(self.asbuilt_data)} module(s) read"
+                else:
+                    msg = f"Read {len(self.asbuilt_data)} modules"
+                self.after(0, lambda m=msg: self.status_label.setText(m))
             except Exception as e:
                 self.after(0, lambda: self.status_label.setText(f"Error: {e}"))
             finally:
                 self.after(0, lambda: self.read_btn.setEnabled(True))
+                self.after(0, lambda: self.cancel_btn.setEnabled(False))
                 self.after(0, lambda: self.progress.setValue(100))
 
         run_thread(thread)
+
+    def _cancel_read(self):
+        if self._cancel:
+            self._cancel.cancel()
+        self.cancel_btn.setEnabled(False)
 
     def _populate_module_list(self):
         self.module_list.clear()

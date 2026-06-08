@@ -218,13 +218,20 @@ class AsBuiltReader:
         # standard DSC subfunction but still respond to $22 reads in the
         # implicit default session. Don't abort the read just because
         # DSC failed; let the actual DID requests speak for themselves.
-        for s in (UDSSession.EXTENDED, UDSSession.FORD_DIAG,
-                  UDSSession.FORD_LEGACY_C0, UDSSession.FORD_LEGACY_81):
-            try:
-                client.diagnostic_session(s)
-                break
-            except Exception:
-                continue
+        # Result is cached per-client so we don't re-walk all four
+        # subfunctions on every module call.
+        if getattr(client, "_fuse_dsc_cache", None) is None:
+            for s in (UDSSession.EXTENDED, UDSSession.FORD_DIAG,
+                      UDSSession.FORD_LEGACY_C0, UDSSession.FORD_LEGACY_81):
+                try:
+                    client.diagnostic_session(s)
+                    client._fuse_dsc_cache = True
+                    break
+                except Exception:
+                    continue
+            else:
+                try: client._fuse_dsc_cache = False
+                except Exception: pass
 
         did_ranges = ASBUILT_DID_RANGES.get(module.abbreviation, [DEFAULT_DID_RANGE])
 
@@ -239,14 +246,30 @@ class AsBuiltReader:
 
         return result
 
-    def read_all_modules(self, callback=None) -> list[ModuleAsBuilt]:
+    def read_all_modules(self, callback=None, modules=None,
+                          cancel=None) -> list[ModuleAsBuilt]:
+        """Read As-Built blocks from every module that has a known DID
+        range. Pass `modules` to restrict the scan to a pre-discovered
+        list (e.g. results from VehicleConnection.scan_modules) — this
+        avoids the shotgun 55-address probe on sparse vehicles like
+        CD3 (~6 live modules). `cancel` is an optional CancelToken;
+        polled between modules so the user can abort a long scan.
+        """
         results = []
-        modules_to_scan = [
-            m for m in FORD_MODULES
-            if m.abbreviation in ASBUILT_DID_RANGES
-        ]
+        if modules is None:
+            modules_to_scan = [
+                m for m in FORD_MODULES
+                if m.abbreviation in ASBUILT_DID_RANGES
+            ]
+        else:
+            modules_to_scan = [
+                m for m in modules
+                if m.abbreviation in ASBUILT_DID_RANGES
+            ]
 
         for i, module in enumerate(modules_to_scan):
+            if cancel is not None and getattr(cancel, "cancelled", False):
+                break
             if callback:
                 callback(module.name, i, len(modules_to_scan))
             result = self.read_module(module)

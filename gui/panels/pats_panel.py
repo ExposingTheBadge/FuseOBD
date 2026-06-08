@@ -187,10 +187,19 @@ class PATSPanel(BasePanel):
         def thread():
             try:
                 self.pats_manager = PATSManager(vehicle)
-                info_val = self.pats_manager.read_pats_info()
+                self._log("Reading PATS DIDs from PCM:")
+                info_val = self.pats_manager.read_pats_info(log=self._log)
+                hits = getattr(self.pats_manager, "_last_read_hits", 0)
                 self.after(0, lambda: self._display_info(info_val))
-                self.after(0, lambda: self.status_label.setText("PATS info read successfully"))
-                self._log("PATS configuration read successfully")
+                if hits == 0:
+                    msg = ("PCM did not expose PATS via standard $22 DIDs "
+                           "(pre-2008 CD3 platforms typically don't)")
+                elif hits < 5:
+                    msg = f"PATS read partial ({hits} fields)"
+                else:
+                    msg = f"PATS read OK ({hits} fields)"
+                self.after(0, lambda m=msg: self.status_label.setText(m))
+                self._log(msg)
             except Exception as e:
                 self.after(0, lambda: self.status_label.setText(f"Error: {e}"))
                 self._log(f"Error reading PATS: {e}")

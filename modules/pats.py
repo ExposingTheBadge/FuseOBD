@@ -103,17 +103,28 @@ def _try_extended(client: UDSClient) -> bool:
     is non-fatal — pre-2008 CD3 / U-platform modules NRC all standard
     DSC subfunctions but still answer $22 reads in the implicit
     default session.
+
+    Result is cached per-client. CD3 modules NRC every subfunction;
+    re-walking the whole list on each PATS DID burns ~4s × 30 reads
+    = 2 minutes per Read PATS, all for nothing.
     """
+    cached = getattr(client, "_fuse_dsc_cache", None)
+    if cached is not None:
+        return cached
     for s in (UDSSession.EXTENDED, UDSSession.FORD_DIAG,
               UDSSession.FORD_LEGACY_C0, UDSSession.FORD_LEGACY_81,
               UDSSession.DEFAULT):
         try:
             client.diagnostic_session(s)
+            try: client._fuse_dsc_cache = True
+            except Exception: pass
             return True
         except (UDSException, TimeoutError):
             continue
         except Exception:
             continue
+    try: client._fuse_dsc_cache = False
+    except Exception: pass
     return False
 
 
@@ -153,7 +164,7 @@ class PATSManager:
                     break
         return self._icm_client
 
-    def read_pats_info(self) -> PATSInfo:
+    def read_pats_info(self, log=None) -> PATSInfo:
         pcm = self._get_pcm()
         # CD3-era PCMs NRC standard UDS DSC (7F 10 11/12) but still
         # answer $22 DID reads in the implicit default session. Best-
@@ -172,38 +183,32 @@ class PATSManager:
             ("ANTISCAN", "anti_scan"),
             ("MASTERKEY", "master_key"),
             ("PATSENABL", "pats_enabled"),
+            ("PCMID", "pcm_id"),
+            ("PATS_ABS_ALGO", "algo_variant"),
+            ("NUM_KEYS", "num_keys_programmed"),
         ]
 
+        def _log(msg):
+            if log is not None:
+                try: log(msg)
+                except Exception: pass
+
+        hits = 0
         for did_name, attr_name in param_map:
+            did = PATS_DIDS[did_name]
             try:
-                did = PATS_DIDS[did_name]
                 data = pcm.read_data_by_id(did)
                 if data:
                     value = int.from_bytes(data[:min(4, len(data))], "big")
                     setattr(info, attr_name, value)
-            except (UDSException, TimeoutError):
-                pass
-
-        try:
-            data = pcm.read_data_by_id(PATS_DIDS["PCMID"])
-            if data:
-                info.pcm_id = int.from_bytes(data[:min(4, len(data))], "big")
-        except (UDSException, TimeoutError):
-            pass
-
-        try:
-            data = pcm.read_data_by_id(PATS_DIDS["PATS_ABS_ALGO"])
-            if data:
-                info.algo_variant = int.from_bytes(data[:min(4, len(data))], "big")
-        except (UDSException, TimeoutError):
-            pass
-
-        try:
-            data = pcm.read_data_by_id(PATS_DIDS["NUM_KEYS"])
-            if data:
-                info.num_keys_programmed = int.from_bytes(data[:min(4, len(data))], "big")
-        except (UDSException, TimeoutError):
-            pass
+                    hits += 1
+                    _log(f"  ${did:04X} {did_name:<14s} OK  = {value}")
+                else:
+                    _log(f"  ${did:04X} {did_name:<14s} empty response")
+            except UDSException as e:
+                _log(f"  ${did:04X} {did_name:<14s} NRC {e}")
+            except TimeoutError:
+                _log(f"  ${did:04X} {did_name:<14s} timeout")
 
         if info.timed_delay == 0:
             info.timed_delay = 10
@@ -211,6 +216,10 @@ class PATSManager:
         if info.master_key == -1 and info.pats_enabled != -1:
             info.master_key = info.pats_enabled
 
+        # Stash the hit count so the UI can report partial vs nothing.
+        # Pre-2008 CD3 PCMs don't expose PATS via standard $22 DIDs and
+        # come back with zero hits.
+        self._last_read_hits = hits
         self.pats_info = info
         return info
 
