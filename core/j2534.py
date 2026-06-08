@@ -1338,6 +1338,10 @@ class J2534:
             with self._stream_lock:
                 self._stream.flush()
                 hex_data = payload.hex().upper()
+                # Stash the request so read_msgs can drop the echo line
+                # the ELM emits before the real response (some adapters
+                # echo even with ATE0 on the first response after open).
+                ch["last_tx_hex"] = hex_data
                 self._stream.write((hex_data + "\r").encode("ascii"))
                 import time as _time
                 _time.sleep(0.01)
@@ -1353,49 +1357,93 @@ class J2534:
             if ch is None:
                 return []
             import time as _time
+            import re as _re
             def _log(msg):
                 try:
                     from modules import issues_log as _il
                     _il.log_protocol(msg)
                 except Exception:
                     pass
+
             deadline = _time.time() + timeout / 1000.0
-            results = []
-            # Hold the stream lock for the whole read window. The ELM is
-            # half-duplex — any concurrent write would inject a new
-            # command into the same response we're parsing.
+            last_tx = (ch.get("last_tx_hex") or "").upper()
+
+            # Read until the ELM prompt (">") arrives or we hit deadline.
+            # Short responses commonly arrive in a single read containing
+            # echo + payload + prompt, which the previous parser dropped
+            # because the prompt was in the chunk. Accumulate everything
+            # then parse line-wise.
+            buf = bytearray()
+            saw_prompt = False
             with self._stream_lock:
-                while _time.time() < deadline and len(results) < count:
-                    data = self._stream.read(256, max(50, timeout // 2))
-                    if data:
-                        text = data.decode("ascii", errors="replace").strip()
-                        if text and ">" not in text and "BUS" not in text.upper() \
-                           and "ERROR" not in text.upper() and "NO DATA" not in text.upper():
-                            cleaned = text.replace("\r", "").replace("\n", "").replace(" ", "")
-                            if cleaned and len(cleaned) >= 2:
-                                try:
-                                    raw = bytes.fromhex(cleaned)
-                                    _log(f'CAN RX raw: {cleaned}')
-                                    # ELM327 in AT SP 6 mode strips ISO-TP PCI
-                                    # from received frames automatically. The
-                                    # raw data is the actual payload (service
-                                    # response bytes).
-                                    payload = raw
-                                    rx_id = ch.get("rx_id")
-                                    if rx_id is not None:
-                                        frame = struct.pack(">I", rx_id & 0x7FF) + payload
-                                    else:
-                                        frame = payload
-                                    rx_disp = f"{rx_id:06X}" if isinstance(rx_id, int) else "----"
-                                    _log(f'CAN RX: rx_id={rx_disp} payload={payload.hex().upper()}')
-                                    results.append(frame)
-                                except ValueError:
-                                    pass
-                        elif "NO DATA" in text.upper():
-                            _log(f'CAN RX: NO DATA')
-                    _time.sleep(0.005)
+                while _time.time() < deadline and not saw_prompt:
+                    chunk = self._stream.read(256, max(50, timeout // 4))
+                    if chunk:
+                        buf.extend(chunk)
+                        if b">" in chunk:
+                            saw_prompt = True
+                    else:
+                        _time.sleep(0.005)
+
+            text = buf.decode("ascii", errors="replace")
+            up = text.upper()
+            if "NO DATA" in up:
+                _log("CAN RX: NO DATA")
+                return []
+            if "BUS" in up and "ERROR" in up:
+                _log("CAN RX: BUS ERROR")
+                return []
+            if "CAN ERROR" in up:
+                _log("CAN RX: CAN ERROR")
+                return []
+            if "STOPPED" in up:
+                _log("CAN RX: STOPPED")
+                return []
+
+            # Split on CR/LF and the prompt char; keep only hex tokens
+            # that aren't the echo of the request we just sent. ELM may
+            # also emit length-indicator lines like "014" (decimal byte
+            # count) for ISO-TP — those are 3-char and start with '0',
+            # but a real Mode-22 positive response starts with 0x62 ≥
+            # decimal 98 in hex first nibble (6) so the length-line
+            # filter only fires for short numeric-looking tokens.
+            results = []
+            rx_id = ch.get("rx_id")
+            for line in _re.split(r"[\r\n>]+", text):
+                tok = line.strip().replace(" ", "")
+                if not tok:
+                    continue
+                # STN multi-line ISO-TP prefix "<idx>:bytes" — strip it.
+                m = _re.match(r"^[0-9A-Fa-f]+:(.*)$", tok)
+                if m:
+                    tok = m.group(1).strip()
+                if not tok or not _re.fullmatch(r"[0-9A-Fa-f]+", tok):
+                    continue
+                tok_up = tok.upper()
+                if last_tx and tok_up == last_tx:
+                    continue
+                if len(tok_up) % 2 != 0:
+                    # odd nibble count — probably a length indicator
+                    # ("014") not a real frame; ignore.
+                    continue
+                try:
+                    payload = bytes.fromhex(tok_up)
+                except ValueError:
+                    continue
+                if not payload:
+                    continue
+                if rx_id is not None:
+                    frame = struct.pack(">I", rx_id & 0x7FF) + payload
+                else:
+                    frame = payload
+                rx_disp = f"{rx_id:06X}" if isinstance(rx_id, int) else "----"
+                _log(f"CAN RX: rx_id={rx_disp} payload={payload.hex().upper()}")
+                results.append(frame)
+                if len(results) >= count:
+                    break
+
             if not results:
-                _log(f'CAN RX: timeout (no response)')
+                _log("CAN RX: timeout (no response)")
             return results
         else:
             msgs = (PASSTHRU_MSG * count)()
