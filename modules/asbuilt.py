@@ -210,10 +210,21 @@ class AsBuiltReader:
 
         try:
             client = self.vehicle.get_uds_client(module)
-            client.diagnostic_session(UDSSession.EXTENDED)
         except Exception as e:
             result.error = str(e)
             return result
+
+        # Best-effort extended session — pre-2008 Ford modules NRC every
+        # standard DSC subfunction but still respond to $22 reads in the
+        # implicit default session. Don't abort the read just because
+        # DSC failed; let the actual DID requests speak for themselves.
+        for s in (UDSSession.EXTENDED, UDSSession.FORD_DIAG,
+                  UDSSession.FORD_LEGACY_C0, UDSSession.FORD_LEGACY_81):
+            try:
+                client.diagnostic_session(s)
+                break
+            except Exception:
+                continue
 
         did_ranges = ASBUILT_DID_RANGES.get(module.abbreviation, [DEFAULT_DID_RANGE])
 
@@ -245,7 +256,15 @@ class AsBuiltReader:
 
     def write_block(self, module: FordModule, did: int, data: bytes):
         client = self.vehicle.get_uds_client(module)
-        client.diagnostic_session(UDSSession.EXTENDED)
+        # Best-effort DSC — CD3 NRCs every subfunction but writes may
+        # still go through. Let the write report its own error.
+        for s in (UDSSession.EXTENDED, UDSSession.FORD_DIAG,
+                  UDSSession.FORD_LEGACY_C0, UDSSession.FORD_LEGACY_81):
+            try:
+                client.diagnostic_session(s)
+                break
+            except Exception:
+                continue
         client.write_data_by_id(did, data)
 
     @staticmethod

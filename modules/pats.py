@@ -97,6 +97,26 @@ def is_destructive_routine(routine_id: int) -> bool:
         return False
 
 
+def _try_extended(client: UDSClient) -> bool:
+    """Walk Ford-aware session subfunctions in priority order; return
+    True on first acceptance, False if every subfunction NRCs. Failure
+    is non-fatal — pre-2008 CD3 / U-platform modules NRC all standard
+    DSC subfunctions but still answer $22 reads in the implicit
+    default session.
+    """
+    for s in (UDSSession.EXTENDED, UDSSession.FORD_DIAG,
+              UDSSession.FORD_LEGACY_C0, UDSSession.FORD_LEGACY_81,
+              UDSSession.DEFAULT):
+        try:
+            client.diagnostic_session(s)
+            return True
+        except (UDSException, TimeoutError):
+            continue
+        except Exception:
+            continue
+    return False
+
+
 class PATSError(RuntimeError):
     """Raised for PATS-specific failures — wraps NRCs in human terms."""
 
@@ -135,7 +155,11 @@ class PATSManager:
 
     def read_pats_info(self) -> PATSInfo:
         pcm = self._get_pcm()
-        pcm.diagnostic_session(UDSSession.EXTENDED)
+        # CD3-era PCMs NRC standard UDS DSC (7F 10 11/12) but still
+        # answer $22 DID reads in the implicit default session. Best-
+        # effort the session change and proceed regardless — the DID
+        # reads below all have their own try/except.
+        _try_extended(pcm)
 
         info = PATSInfo()
 
@@ -192,7 +216,7 @@ class PATSManager:
 
     def security_access(self, level: int = 0x01) -> bool:
         pcm = self._get_pcm()
-        pcm.diagnostic_session(UDSSession.EXTENDED)
+        _try_extended(pcm)
 
         seed_data = pcm.security_access_seed(level)
         if not seed_data or all(b == 0 for b in seed_data):
@@ -344,8 +368,8 @@ class PATSManager:
 
     def read_key_count(self) -> int:
         pcm = self._get_pcm()
+        _try_extended(pcm)
         try:
-            pcm.diagnostic_session(UDSSession.EXTENDED)
             data = pcm.read_data_by_id(PATS_DIDS["NUM_KEYS"])
             if data:
                 return int.from_bytes(data[:min(4, len(data))], "big")

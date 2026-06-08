@@ -563,6 +563,8 @@ class AIMechanicWindow(QMainWindow):
                                          source="ai_mechanic_window")
             self._post_to_ui(lambda: self._on_assistant_reply(response))
 
+        threading.Thread(target=worker, daemon=True).start()
+
     def _on_claude_reply(self, response: str):
         self._clear_status()
         self._append_bubble("mechanic",
@@ -577,8 +579,6 @@ class AIMechanicWindow(QMainWindow):
         self.status_label.setText("Ready")
         self._processing = False
         self.input.setFocus()
-
-        threading.Thread(target=worker, daemon=True).start()
 
     def _reset_chat(self):
         if QMessageBox.question(self, "Reset Chat",
