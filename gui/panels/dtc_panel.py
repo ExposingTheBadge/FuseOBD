@@ -12,7 +12,7 @@ from modules.dtc import DTC, DTCReader, ModuleDTCs
 from modules.vehicle_info import decode_vin, get_vehicle_image_url
 from modules.vehicle_sync import sync as vehicle_sync
 from data.dtc_definitions import lookup_dtc
-from gui.qt_helpers import BasePanel, run_thread, confirm
+from gui.qt_helpers import BasePanel, CancelToken, run_thread, confirm
 
 
 class DTCPanel(BasePanel):
@@ -22,6 +22,7 @@ class DTCPanel(BasePanel):
         self.all_dtcs: list[ModuleDTCs] = []
         self.vehicle_info: dict = {}
         self._vehicle_image_url: str | None = None
+        self._cancel: CancelToken | None = None
         self._build_ui()
 
     # ───────────────────────── UI ─────────────────────────
@@ -42,6 +43,14 @@ class DTCPanel(BasePanel):
         self.progress = QProgressBar()
         self.progress.setFixedWidth(150)
         tb.addWidget(self.progress)
+
+        # Cancel sits immediately after the progress bar so the user
+        # always has a stop control adjacent to the running scan.
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.clicked.connect(self._cancel_scan)
+        tb.addWidget(self.cancel_btn)
+
         tb.addStretch(1)
         self.count_label = QLabel("")
         tb.addWidget(self.count_label)
@@ -120,10 +129,13 @@ class DTCPanel(BasePanel):
 
         self.read_btn.setEnabled(False)
         self.clear_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(True)
         # AI button stays enabled — the AI window is always usable.
         self.tree.clear()
         self.progress.setValue(0)
         self.all_dtcs = []
+        self._cancel = CancelToken()
+        token = self._cancel
 
         def thread():
             try:
@@ -149,6 +161,8 @@ class DTCPanel(BasePanel):
                 (0x0A, "OBD-II (Mode 0A permanent)", "PERMANENT", 0x08),
             )
             for mode, mod_label, status_label, status_byte in broadcast_modes:
+                if token.cancelled:
+                    break
                 try:
                     self.after(0, lambda lbl=status_label: self.status_label.setText(
                         f"Reading OBD-II {lbl.lower()} faults..."))
@@ -180,11 +194,11 @@ class DTCPanel(BasePanel):
             # burned ~3 s per non-existent module (NO DATA / CAN ERROR);
             # on a CD3 car probing 19 modules wasted 60+ s of dead time.
             # If no scan has run yet, do it now so we have a real list.
-            if not vehicle.vehicle_info.modules:
+            if not vehicle.vehicle_info.modules and not token.cancelled:
                 self.after(0, lambda: self.status_label.setText(
                     "Discovering modules on the bus..."))
                 try:
-                    vehicle.scan_modules()
+                    vehicle.scan_modules(cancel=token)
                 except Exception:
                     pass
 
@@ -197,6 +211,8 @@ class DTCPanel(BasePanel):
             ]
 
             for i, module in enumerate(discovered):
+                if token.cancelled:
+                    break
                 pct = int((i / max(len(discovered), 1)) * 100)
                 self.after(0, lambda p=pct: self.progress.setValue(p))
                 self.after(0, lambda n=module.name: self.status_label.setText(f"Reading {n}..."))
@@ -236,7 +252,9 @@ class DTCPanel(BasePanel):
             total = sum(m.count for m in all_dtcs)
             self.after(0, lambda: self._populate_results(all_dtcs))
             self.after(0, lambda: self.count_label.setText(f"{total} faults found"))
-            if total == 0:
+            if token.cancelled:
+                msg = f"Scan cancelled. {total} fault(s) found so far."
+            elif total == 0:
                 msg = (f"No fault codes found across {len(discovered) + 1} module(s) "
                        f"(stored, pending, and permanent buckets all clean).")
             else:
@@ -245,8 +263,15 @@ class DTCPanel(BasePanel):
             self.after(0, lambda: self.progress.setValue(100))
             self.after(0, lambda: self.read_btn.setEnabled(True))
             self.after(0, lambda: self.clear_btn.setEnabled(True))
+            self.after(0, lambda: self.cancel_btn.setEnabled(False))
 
         run_thread(thread)
+
+    def _cancel_scan(self):
+        if self._cancel:
+            self._cancel.cancel()
+        self.cancel_btn.setEnabled(False)
+        self.status_label.setText("Cancelling — will stop after the current request...")
 
     def _clear_all(self):
         vehicle = self.get_vehicle()

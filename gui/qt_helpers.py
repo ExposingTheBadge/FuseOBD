@@ -55,6 +55,31 @@ def run_thread(fn: Callable, *args, **kwargs) -> threading.Thread:
     return t
 
 
+class CancelToken:
+    """Cooperative cancellation flag shared between UI and worker thread.
+
+    Workers must poll ``token.cancelled`` at safe interruption points
+    (e.g. between module iterations, between bus broadcasts). Python's
+    threading model can't forcibly stop a thread mid-syscall — the
+    worst-case latency is one outstanding adapter read (≈1.5 s on
+    ELM-class hardware). The UI side calls ``token.cancel()`` when the
+    user clicks Cancel.
+    """
+
+    def __init__(self):
+        self._evt = threading.Event()
+
+    def cancel(self) -> None:
+        self._evt.set()
+
+    def reset(self) -> None:
+        self._evt.clear()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._evt.is_set()
+
+
 def warn(parent: QWidget, title: str, text: str) -> None:
     QMessageBox.warning(parent, title, text)
 

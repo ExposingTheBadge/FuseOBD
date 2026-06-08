@@ -103,15 +103,22 @@ class VehicleConnection:
         self._uds_clients[key] = client
         return client
 
-    def scan_modules(self, callback=None) -> list[ModuleInfo]:
+    def scan_modules(self, callback=None, cancel=None) -> list[ModuleInfo]:
         # Pre-2008 Ford modules (CD3, U-platform, etc.) reject
         # DiagnosticSessionControl with NRC 0x11 — but they happily
         # answer $22 reads in the implicit default session. Skip DSC
         # entirely and use a $22 0200 ping to detect presence: a
         # positive response OR a NRC both mean "module is alive on
         # the bus." Only a true timeout = absent.
+        #
+        # `cancel` is a gui.qt_helpers.CancelToken (or any object with
+        # a `.cancelled` property). When set, the loop exits after the
+        # current outstanding request returns — typical worst-case
+        # latency is one adapter read (~1.5 s).
         found = []
         for i, module in enumerate(FORD_MODULES):
+            if cancel is not None and cancel.cancelled:
+                break
             if callback:
                 callback(module.name, i, len(FORD_MODULES))
             try:

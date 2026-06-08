@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (
 
 from core.protocols import FordNetwork
 from core.vehicle import ModuleInfo
-from gui.qt_helpers import BasePanel, run_thread
+from gui.qt_helpers import BasePanel, CancelToken, run_thread
 
 
 _NETWORK_LABEL = {
@@ -22,6 +22,7 @@ class ScannerPanel(BasePanel):
     def __init__(self, parent: QWidget, get_vehicle):
         super().__init__(parent)
         self.get_vehicle = get_vehicle
+        self._cancel: CancelToken | None = None
         self._build_ui()
 
     def _build_ui(self):
@@ -40,9 +41,15 @@ class ScannerPanel(BasePanel):
         tb.addWidget(self.count_label)
         v.addLayout(tb)
 
+        prog_row = QHBoxLayout()
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
-        v.addWidget(self.progress)
+        prog_row.addWidget(self.progress, stretch=1)
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.clicked.connect(self._cancel_scan)
+        prog_row.addWidget(self.cancel_btn)
+        v.addLayout(prog_row)
 
         self.status_label = QLabel("Ready")
         v.addWidget(self.status_label)
@@ -64,31 +71,49 @@ class ScannerPanel(BasePanel):
             return
 
         self.scan_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(True)
         self.tree.clear()
         self.progress.setValue(0)
+        self._cancel = CancelToken()
+        token = self._cancel
 
         def thread():
             try:
                 vin = vehicle.read_vin()
                 self.after(0, lambda: self.vin_label.setText(f"VIN: {vin or 'Not found'}"))
+                if token.cancelled:
+                    self.after(0, lambda: self.status_label.setText("Scan cancelled."))
+                    return
 
                 def progress_cb(name, current, total):
                     pct = int((current / total) * 100) if total else 0
                     self.after(0, lambda: self.progress.setValue(pct))
                     self.after(0, lambda: self.status_label.setText(f"Scanning {name}..."))
 
-                modules = vehicle.scan_modules(callback=progress_cb)
+                modules = vehicle.scan_modules(callback=progress_cb, cancel=token)
                 self.after(0, lambda: self._populate_results(modules))
-                self.after(0, lambda: self.status_label.setText(
-                    f"Scan complete. Found {len(modules)} modules."
-                ))
+                if token.cancelled:
+                    self.after(0, lambda: self.status_label.setText(
+                        f"Scan cancelled. Found {len(modules)} modules before stop."
+                    ))
+                else:
+                    self.after(0, lambda: self.status_label.setText(
+                        f"Scan complete. Found {len(modules)} modules."
+                    ))
             except Exception as e:
                 self.after(0, lambda: self.status_label.setText(f"Error: {e}"))
             finally:
                 self.after(0, lambda: self.scan_btn.setEnabled(True))
+                self.after(0, lambda: self.cancel_btn.setEnabled(False))
                 self.after(0, lambda: self.progress.setValue(100))
 
         run_thread(thread)
+
+    def _cancel_scan(self):
+        if self._cancel:
+            self._cancel.cancel()
+        self.cancel_btn.setEnabled(False)
+        self.status_label.setText("Cancelling — will stop after the current module...")
 
     def _populate_results(self, modules: list[ModuleInfo]):
         self.tree.clear()
