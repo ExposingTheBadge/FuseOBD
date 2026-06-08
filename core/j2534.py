@@ -1616,8 +1616,14 @@ class J2534:
             "ATH0",        # Headers off
             "ATS0",        # Spaces off
             "ATSP6",       # ISO 15765-4 11-bit 500k (HS-CAN)
-            "ATAT1",       # Adaptive timing mode 1
-            "ATSTFF",      # Max response timeout
+            "ATAT1",       # Adaptive timing mode 1 — auto-adjusts within ATST cap
+            # ATST 32 = 0x32 * 4 ms = 200 ms response timeout. The old
+            # ATSTFF (1.02 s) was the cap that made every per-PID round
+            # trip take ~1+ s of wall clock even when the ECU answered
+            # in 50 ms. Adaptive timing keeps us safe on slow modules —
+            # it raises the actual wait when responses run long, but
+            # 200 ms is the ceiling, not the floor.
+            "ATST32",
             "ATTA30",      # Tester address = 0x30 (diag-reference default)
             "ATCF700",     # CAN filter base = 0x700
             "ATCMF00",     # CAN mask = 0xF00  — together: pass 0x700-0x7FF

@@ -358,11 +358,28 @@ class VehicleConnection:
         adapters because the ECU is still asleep."""
         self._obd_wake_if_stale()
         try:
-            self.j2534._elm_cmd(self.j2534._stream, "ATSP6", 600)
-            self.j2534._elm_cmd(self.j2534._stream, "ATSH 7DF", 400)
-            self.j2534._elm_cmd(self.j2534._stream, "ATAR", 200)
-            self.j2534._last_sh = None
-            self.j2534._last_cra = None
+            # Cache the OBD broadcast setup — once SP6 + SH 7DF + AR are
+            # programmed they stay valid until a UDS call swaps in a
+            # different ATSH for module-directed traffic. Skip the
+            # 3-command re-setup whenever the broadcast header is
+            # already in place. Saves ~150 ms of serial chatter per
+            # monitor tick.
+            need_setup = (
+                not getattr(self, "_obd_setup_done", False) or
+                getattr(self.j2534, "_last_sh", None) != "0007DF"
+            )
+            if need_setup:
+                self.j2534._elm_cmd(self.j2534._stream, "ATSP6", 600)
+                self.j2534._elm_cmd(self.j2534._stream, "ATSH 7DF", 400)
+                self.j2534._elm_cmd(self.j2534._stream, "ATAR", 200)
+                # Drop ATST from 1.02 s (FF) down to 100 ms (19) so the
+                # prompt comes back as soon as the last byte arrives.
+                # ECUs respond in <60 ms on a healthy bus; the long
+                # default was the single biggest live-data bottleneck.
+                self.j2534._elm_cmd(self.j2534._stream, "ATST19", 200)
+                self.j2534._last_sh = "0007DF"
+                self.j2534._last_cra = None
+                self._obd_setup_done = True
             hex_cmd = payload.hex().upper()
             # NO STN message-count suffix on Mode 09 broadcasts. The
             # suffix means "lines of output" to the STN, not "ISO-TP
@@ -373,10 +390,10 @@ class VehicleConnection:
             # OBD Auto Doctor capture which uses no suffix and gets
             # the full 3-frame VIN in 77 ms.
             self.j2534._stream.write(hex_cmd.encode() + b"\r")
-            # The ELM doesn't emit `>` until ATST elapses after the
-            # last received byte. Read at least 1500 ms so we don't
-            # return mid-response.
-            effective_timeout = max(timeout_ms, 1500)
+            # ATST 19 means the prompt arrives ~100 ms after the last
+            # response byte. Don't over-clamp the read timeout — that
+            # was the second half of the live-data bottleneck.
+            effective_timeout = max(timeout_ms, 400)
             resp = self.j2534._elm_read_until_prompt(
                 self.j2534._stream, effective_timeout,
             )
