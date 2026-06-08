@@ -367,12 +367,40 @@ class VehicleConnection:
             )
             if not resp:
                 return None
-            # Strip whitespace and the ELM prompt char so we can hex-
-            # decode cleanly. Multi-frame ISO-TP responses arrive as
-            # several lines; concatenate.
-            cleaned = resp.upper().replace(" ", "").replace("\n", "").replace("\r", "")
-            cleaned = "".join(c for c in cleaned if c in "0123456789ABCDEF")
-            if not cleaned:
+            # STN-family adapters print multi-frame ISO-TP responses
+            # in a numbered-line format:
+            #     0902               <- request echo
+            #     014                <- ISO-TP total length (0x14 = 20)
+            #     0:490201334C4E    <- frame index, then payload
+            #     1:484D3236313136
+            #     2:52363635353632
+            # A naive hex-only filter keeps the "0", "1", "2" frame-
+            # index digits and corrupts the byte stream. And the "014"
+            # length line introduces an odd nibble that fromhex() would
+            # truncate from the wrong end (lopping off the last VIN
+            # char). Build the byte stream line-by-line: strip the
+            # "<idx>:" prefix, drop the request echo, drop the bare
+            # length-only line.
+            import re
+            echo = hex_cmd.upper()
+            kept = []
+            for line in resp.upper().splitlines():
+                line = line.strip().rstrip(">").strip()
+                if not line:
+                    continue
+                # Strip STN frame-index prefix ("0:", "1:", ... "F:").
+                m = re.match(r"^[0-9A-F]+:(.*)$", line)
+                if m:
+                    line = m.group(1).strip()
+                if not re.fullmatch(r"[0-9A-F]+", line):
+                    continue
+                if line == echo or line == echo.rstrip("1"):
+                    continue   # request echo (with or without STN count)
+                if len(line) <= 3:
+                    continue   # ISO-TP length indicator like "014"
+                kept.append(line)
+            cleaned = "".join(kept)
+            if not cleaned or len(cleaned) % 2:
                 return None
             try:
                 raw = bytes.fromhex(cleaned)
