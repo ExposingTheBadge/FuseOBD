@@ -27,6 +27,19 @@ DID_FORD_CALIBRATION_ID        = 0xE219  # ASCII (4 hex chars), e.g. "0409"
 DID_FORD_ASSEMBLY_PART_NUMBER  = 0xE21A  # ASCII (4 chars), e.g. "WM5F" / "2M51"
 DID_FORD_MODULE_CONFIG         = 0xE200  # binary configuration data
 DID_FORD_CALIBRATION_VERIFY    = 0xC9FE  # CVN — Calibration Verification Number
+# Captured 2026-06-07 from a FORScan session on a 2006 Lincoln Zephyr
+# (CD3 first-model-year). FORScan reads these without any session
+# control — they answer in the implicit default session.
+DID_FORD_MODULE_HW_PN          = 0xE610  # 24-byte ASCII hardware P/N, Ford
+                                         # format "PREFIX-BASE-SUFFIX" or
+                                         # "HW-XXXX-XXXXX-XX" — e.g.
+                                         # "5G13-14C336-AA", "HW-6E5C-2C219-AE"
+DID_FORD_MODULE_CONFIG_FLAGS   = 0xE6F3  # 1-byte config flags (Ford)
+DID_FORD_MODULE_ALIVE_PROBE    = 0x0200  # 1-byte "are you there" ping —
+                                         # FORScan reads this first against
+                                         # every module address as a cheap
+                                         # presence check before iterating
+                                         # the full DID battery
 
 # ── Vehicle identification (Ford-encoded; NOT ASCII VIN) ──
 # These return single-byte brand/platform markers, not VIN characters.
@@ -181,6 +194,19 @@ FORD_DID_REGISTRY: dict[int, FordDID] = {
     DID_FORD_CALIBRATION_VERIFY: FordDID(
         DID_FORD_CALIBRATION_VERIFY, "Calibration Verification Number (CVN)",
         decoder=lambda b: b.hex().upper(),
+    ),
+    DID_FORD_MODULE_HW_PN: FordDID(
+        DID_FORD_MODULE_HW_PN, "Module Hardware Part Number",
+        decoder=_decode_ascii,
+        notes="Verified on CD3 PCM/TCM (e.g. 5G13-14C336-AA, HW-6E5C-2C219-AE)",
+    ),
+    DID_FORD_MODULE_CONFIG_FLAGS: FordDID(
+        DID_FORD_MODULE_CONFIG_FLAGS, "Module Configuration Flags",
+    ),
+    DID_FORD_MODULE_ALIVE_PROBE: FordDID(
+        DID_FORD_MODULE_ALIVE_PROBE, "Module Alive Probe",
+        notes="FORScan reads this first as a presence check; positive "
+              "response means the module is on-bus and accepting $22",
     ),
     DID_PCM_ODOMETER_USAGE: FordDID(
         DID_PCM_ODOMETER_USAGE, "Odometer / Usage",

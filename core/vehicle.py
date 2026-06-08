@@ -41,6 +41,14 @@ class VehicleInfo:
     model_year: int = 0
     modules: list[ModuleInfo] = field(default_factory=list)
     battery_voltage: float = 0.0
+    # Mode 09 PID 04 ("Calibration ID") — one or more ASCII calibration
+    # strings, one per responding ECU. Captured 2026-06-07 from a 2006
+    # Lincoln Zephyr: PCM returned "ICE7-14C337-AE", TCM returned
+    # "6E53-14C336-AA". OBD Auto Doctor and FORScan both read this.
+    cal_ids: list[str] = field(default_factory=list)
+    # Mode 09 PID 06 ("Calibration Verification Number") — 4-byte
+    # CRC-style checksum per ECU. Surface as hex strings.
+    cvns: list[str] = field(default_factory=list)
 
 
 class VehicleConnection:
@@ -50,6 +58,14 @@ class VehicleConnection:
         self.ms_channel: Optional[int] = None
         self.vehicle_info = VehicleInfo()
         self._uds_clients: dict[int, UDSClient] = {}
+        # OBD-II compliance listeners enter low-power mode after a few
+        # seconds of no diagnostic activity, then NRC / time out the
+        # first request after that. A Mode 01 PID 00 broadcast wakes
+        # them — both FORScan and OBD Auto Doctor send 0100 before any
+        # other broadcast (see scan_obd_auto_doctor.pcapng line 47-49,
+        # scan.pcapng line 156-159). Cache the wake state so we only
+        # spend the 30-ms wake once per connection.
+        self._obd_woken_at_ms = 0.0
 
     def connect_hs_can(self):
         self.hs_channel = self.j2534.connect(Protocol.ISO15765, 0, 500000)
@@ -169,14 +185,25 @@ class VehicleConnection:
         # because it works on cars whose modules don't speak full UDS
         # (2006 CD3 / U-platform, most non-Ford vehicles), where the
         # session-based path below would just chew through the budget
-        # collecting NRCs. The trade-off is one ATSP6/ATSH 7DF state
-        # change up front, which Method 2 has to undo.
+        # collecting NRCs. _obd_request handles the wake (`01 00`) and
+        # STN-adapter message-count suffix; the parser tolerates both
+        # the legacy single-frame and the ISO-TP multi-frame response.
         try:
-            data = self._obd_request(b"\x09\x02")
-            if data and len(data) > 3 and data[0:2] == b"\x49\x02":
-                vin = data[3:].decode("ascii", errors="replace").strip("\x00").strip()
-                if len(vin) == 17:
+            raw = self._obd_request(b"\x09\x02")
+            if raw:
+                vin = self._parse_mode09_pid02(raw)
+                if vin:
                     self.vehicle_info.vin = vin
+                    # While the OBD-II listener is awake and we know
+                    # the bus is alive, opportunistically also grab
+                    # CalID + CVN. Both come back in well under 100 ms
+                    # and they're invaluable for verifying which
+                    # calibration is flashed in the PCM.
+                    try:
+                        self.read_calibration_ids(timeout_ms=600)
+                        self.read_cvns(timeout_ms=600)
+                    except Exception:
+                        pass
                     return vin
         except Exception:
             pass
@@ -244,41 +271,204 @@ class VehicleConnection:
 
         return ""
 
-    def _obd_request(self, payload: bytes, timeout_ms: int = 1000) -> Optional[bytes]:
-        """Send a raw OBD-II request: set broadcast header 0x7DF, send Mode/PID, read 0x7E8."""
+    # ── OBD-II broadcast helpers ────────────────────────────────────
+
+    # Apps known to be STN-class (vLinker FS, OBDLink SX/EX, ScanTool
+    # STN-family). On these, appending a message-count digit to a
+    # broadcast request ("09021" instead of "0902") makes the adapter
+    # return as soon as N responses are seen instead of waiting the
+    # full ATST timeout. Without it the ELM grinds out and the user
+    # sees STOPPED — see the FuseOBD log at 20:22:05.422 vs the
+    # FORScan capture at +6.872 which returned in 80 ms.
+    _STN_ADAPTER_KINDS = {
+        "stn1110", "stn1170", "stn2120", "stn2255",
+        "obdlink_sx", "obdlink_ex", "obdlink_mxp", "obdlink_lx",
+        "vlinker_fs", "vlinker_mcp", "kiwi3",
+    }
+
+    def _is_stn_class(self) -> bool:
+        """True if the current adapter belongs to the STN family."""
         try:
-            # Force protocol 6 (ISO 15765-4, 11-bit, 500k) and set OBD broadcast header
+            ident = getattr(self.j2534, "_identity", None)
+            if ident and getattr(ident, "kind", "") in self._STN_ADAPTER_KINDS:
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _obd_wake_if_stale(self) -> None:
+        """Send `0100` (Mode 01 PID 00) to wake the OBD-II compliance
+        listener. Cached: re-runs only if the previous wake is older
+        than 30 s, since once an ECU has been woken it stays awake as
+        long as we keep talking to it."""
+        import time
+        now = time.monotonic() * 1000.0
+        if now - self._obd_woken_at_ms < 30000.0:
+            return
+        try:
             self.j2534._elm_cmd(self.j2534._stream, "ATSP6", 600)
             self.j2534._elm_cmd(self.j2534._stream, "ATSH 7DF", 400)
             self.j2534._elm_cmd(self.j2534._stream, "ATAR", 200)
-            # We just changed the ELM's tx-header out from under the
-            # j2534's start_msg_filter cache. Invalidate it so any
-            # subsequent UDS module call resends ATSH<txid> instead of
-            # short-circuiting on a stale "this header is already set".
+            # Mark headers as dirty for the j2534's start_msg_filter cache.
             self.j2534._last_sh = None
             self.j2534._last_cra = None
-            # Send the OBD request as hex (e.g., "0902")
+            wake = "01001" if self._is_stn_class() else "0100"
+            self.j2534._stream.write(wake.encode() + b"\r")
+            time.sleep(0.05)
+            # 600 ms is enough for both PCM and TCM to answer.
+            self.j2534._elm_cmd(self.j2534._stream, "", 600)
+            self._obd_woken_at_ms = now
+        except Exception:
+            # Wake is best-effort. If it failed, the caller will see
+            # the failure on its own request and retry naturally.
+            pass
+
+    def _obd_request(self, payload: bytes, timeout_ms: int = 1000) -> Optional[bytes]:
+        """Send a raw OBD-II Mode XX PID YY request via broadcast 0x7DF.
+
+        Returns the raw response bytes (with the 0x4N service-echo
+        byte still attached so callers can sanity-check the mode),
+        or None on failure.
+
+        Wakes the compliance listener with `01 00` first if it hasn't
+        been used in the last 30s — without this the first request
+        after a quiet period typically returns STOPPED on STN-class
+        adapters because the ECU is still asleep."""
+        self._obd_wake_if_stale()
+        try:
+            self.j2534._elm_cmd(self.j2534._stream, "ATSP6", 600)
+            self.j2534._elm_cmd(self.j2534._stream, "ATSH 7DF", 400)
+            self.j2534._elm_cmd(self.j2534._stream, "ATAR", 200)
+            self.j2534._last_sh = None
+            self.j2534._last_cra = None
             import time
             hex_cmd = payload.hex().upper()
+            if self._is_stn_class():
+                # Append the STN message-count digit. "1" is correct
+                # for single-ECU responses (Mode 09 PIDs); for multi-
+                # ECU PIDs like Mode 01 supported-PIDs broadcasts you'd
+                # want a higher number, but Mode 09 is single-responder
+                # for the addressed PID so "1" is right here.
+                hex_cmd = hex_cmd + "1"
             self.j2534._stream.write(hex_cmd.encode() + b"\r")
             time.sleep(0.05)
-            # Read response
             resp = self.j2534._elm_cmd(self.j2534._stream, "", timeout_ms)
-            # Parse: should contain "49 02 01 XX XX ..."
-            if resp and "49" in resp and "02" in resp:
-                parts = resp.strip().replace(" ", "").upper()
-                if "490201" in parts:
-                    try:
-                        vin_hex = parts[parts.index("490201")+6:parts.index("490201")+40]
-                        raw = bytes.fromhex(vin_hex)
-                        vin = raw.decode("ascii", errors="replace").strip("\x00")
-                        if len(vin) >= 17:
-                            return vin[:17].encode()
-                    except Exception:
-                        pass
-            return None
+            if not resp:
+                return None
+            # Strip whitespace, header echoes, and the ELM prompt char
+            # so we can hex-decode cleanly. Multi-frame ISO-TP responses
+            # arrive as several lines; concatenate.
+            cleaned = resp.upper().replace(" ", "").replace("\n", "").replace("\r", "")
+            # Filter to hex chars only — drops "STOPPED", "?", etc.
+            cleaned = "".join(c for c in cleaned if c in "0123456789ABCDEF")
+            if not cleaned:
+                return None
+            try:
+                raw = bytes.fromhex(cleaned)
+            except ValueError:
+                return None
+            return raw if raw else None
         except Exception:
             return None
+
+    def _parse_mode09_pid02(self, raw: bytes) -> Optional[str]:
+        """Extract a VIN from a Mode 09 PID 02 response. Handles both
+        the legacy single-frame form (`49 02 01 <17 ASCII bytes>`) and
+        the modern ISO-TP multi-frame form where the same 17 chars are
+        spread over a first frame + two consecutive frames."""
+        # The ELM, with headers off (FuseOBD default), returns either a
+        # bare "49 02 01 <chars>" or a multi-line concatenation that
+        # includes the consecutive-frame index bytes (21, 22, ...).
+        # In _obd_request we've already stripped headers/whitespace and
+        # hex-decoded, but ISO-TP framing bytes may still be present.
+        h = raw.hex().upper()
+        idx = h.find("490201")
+        if idx < 0:
+            return None
+        body = h[idx + len("490201"):]
+        # Strip any consecutive-frame index bytes (0x2N). The VIN is
+        # 17 ASCII chars = 34 hex chars; pull the first 17 valid ASCII
+        # bytes encountered, skipping bytes in the 0x20-0x2F range that
+        # look like CF indices when they appear before a printable run.
+        chars: list[str] = []
+        i = 0
+        while i + 2 <= len(body) and len(chars) < 17:
+            b = int(body[i:i+2], 16)
+            if 0x30 <= b <= 0x5A or 0x61 <= b <= 0x7A:
+                chars.append(chr(b))
+            # else: 0x2N consecutive-frame index byte, skip
+            i += 2
+        vin = "".join(chars)
+        return vin if len(vin) == 17 else None
+
+    def read_calibration_ids(self, timeout_ms: int = 1500) -> list[str]:
+        """Mode 09 PID 04 — fetch ASCII calibration IDs from every
+        ECU that answers. Stores the result on `vehicle_info.cal_ids`
+        and also returns it."""
+        raw = self._obd_request(b"\x09\x04", timeout_ms=timeout_ms)
+        if not raw:
+            return []
+        h = raw.hex().upper()
+        out: list[str] = []
+        # Each ECU's response begins with `49 04 <n>` where n is the
+        # count of calibration strings, followed by n × 16 ASCII bytes.
+        cursor = 0
+        while True:
+            idx = h.find("4904", cursor)
+            if idx < 0:
+                break
+            cursor = idx + 4
+            if cursor + 2 > len(h):
+                break
+            count = int(h[cursor:cursor+2], 16)
+            cursor += 2
+            for _ in range(count):
+                chunk_hex = h[cursor:cursor + 32]   # 16 bytes
+                cursor += 32
+                if len(chunk_hex) < 2:
+                    break
+                try:
+                    ascii_bytes = bytes.fromhex(chunk_hex)
+                except ValueError:
+                    continue
+                s = ascii_bytes.decode("ascii", errors="replace").strip("\x00").strip()
+                # Filter ISO-TP framing junk (e.g. lone "0" or "0\x14")
+                if s and any(c.isalnum() for c in s):
+                    out.append(s)
+        # Deduplicate while preserving order
+        seen = set()
+        unique = [s for s in out if not (s in seen or seen.add(s))]
+        self.vehicle_info.cal_ids = unique
+        return unique
+
+    def read_cvns(self, timeout_ms: int = 1500) -> list[str]:
+        """Mode 09 PID 06 — fetch 4-byte Calibration Verification
+        Numbers (CVNs) from every responding ECU. Returns them as
+        uppercase hex strings."""
+        raw = self._obd_request(b"\x09\x06", timeout_ms=timeout_ms)
+        if not raw:
+            return []
+        h = raw.hex().upper()
+        out: list[str] = []
+        cursor = 0
+        while True:
+            idx = h.find("4906", cursor)
+            if idx < 0:
+                break
+            cursor = idx + 4
+            if cursor + 2 > len(h):
+                break
+            count = int(h[cursor:cursor+2], 16)
+            cursor += 2
+            for _ in range(count):
+                cvn_hex = h[cursor:cursor + 8]  # 4 bytes per CVN
+                cursor += 8
+                if len(cvn_hex) == 8:
+                    out.append(cvn_hex)
+        seen = set()
+        unique = [s for s in out if not (s in seen or seen.add(s))]
+        self.vehicle_info.cvns = unique
+        return unique
 
     def read_battery_voltage(self) -> float:
         v = self.j2534.read_battery_voltage()

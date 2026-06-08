@@ -418,6 +418,14 @@ class ConnectionPanel(BasePanel):
                 ident = identify(f"{fw} {dll}".strip())
                 friendly = ident.label()
                 _log(f"Identified: kind={ident.kind} vendor={ident.vendor} model={ident.model} fw={ident.firmware}")
+                # Stash the identity on the J2534 so downstream code
+                # (VehicleConnection._is_stn_class) can adapt protocol
+                # behaviour per adapter family without re-running the
+                # identify() match.
+                try:
+                    self.j2534._identity = ident
+                except Exception:
+                    pass
 
                 # Compare the firmware against the latest known version
                 # for this adapter family. Outdated -> raise an issue with
