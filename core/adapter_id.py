@@ -140,12 +140,21 @@ def identify(raw: str) -> AdapterIdentity:
 # tries these in priority order; the index of the previously-successful
 # baud is remembered so the second connect is instant.
 COMMON_BAUDS = (
-    500000,    # most common Ford/CAN adapter default
-    115200,    # ELM327 default
-    921600,    # vLinker FS USB / STN1170 default
-    1228800,   # newer STN1170 high-speed mode
+    115200,    # ELM327 / OBDLink SX / STN-family factory default
+               # over USB (FTDI). Tried first because: (a) the FTDI
+               # driver comes up at 115200 by default, (b) FORScan /
+               # OBD Auto Doctor / ELMConfig all open at 115200,
+               # (c) starting at 500K when the link is actually
+               # 115200 burns ~3 seconds on every connect before
+               # falling back.
+    500000,    # Some Ford-CAN adapters and J2534 PassThru DLLs
+               # negotiate 500K on USB; STN-family adapters can also
+               # be switched here via ATBRD post-connect for faster
+               # bulk reads.
+    921600,    # vLinker FS USB / STN1170 high-speed (post-ATBRD)
+    1228800,   # newer STN1170 highest speed
     460800,    # OBDLink MX+ / STN2255 fast mode
     230400,    # midrange clones
-    38400,     # legacy ELM327
-    9600,      # very old / Bluetooth slow mode
+    38400,     # legacy ELM327 factory default (pre-FTDI clones)
+    9600,      # very old / Bluetooth SPP slow mode
 )

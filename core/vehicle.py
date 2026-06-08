@@ -319,10 +319,11 @@ class VehicleConnection:
             self.j2534._last_sh = None
             self.j2534._last_cra = None
             self.j2534._stream.write(b"0100\r")
-            # 600 ms is enough for both PCM and TCM to answer; we just
-            # READ the response — do not send another CR (a bare CR
-            # tells the ELM to retransmit, which corrupts pairing).
-            self.j2534._elm_read_until_prompt(self.j2534._stream, 600)
+            # 1500 ms — must exceed ATST (FF→1020 ms). The first reply
+            # bytes arrive in ~60 ms but the ELM doesn't emit `>` until
+            # ATST elapses after the LAST byte. If we return early, the
+            # next command interrupts and the ELM answers "STOPPED".
+            self.j2534._elm_read_until_prompt(self.j2534._stream, 1500)
             self._obd_woken_at_ms = now
         except Exception:
             # Wake is best-effort. If it failed, the caller will see
@@ -348,18 +349,21 @@ class VehicleConnection:
             self.j2534._last_sh = None
             self.j2534._last_cra = None
             hex_cmd = payload.hex().upper()
-            # STN message-count suffix — only safe for single-responder
-            # PIDs like Mode 09 02/04/06 (only PCM answers). NOT safe
-            # for Mode 01 broadcasts (PCM + TCM both reply).
-            mode = payload[0] if payload else 0
-            if self._is_stn_class() and mode == 0x09:
-                hex_cmd = hex_cmd + "1"
+            # NO STN message-count suffix on Mode 09 broadcasts. The
+            # suffix means "lines of output" to the STN, not "ISO-TP
+            # messages" — VIN/CalID are multi-frame so suffix="1"
+            # returns after only the first frame. Without the suffix
+            # the ELM waits ATST after the last frame and returns the
+            # fully-assembled message in one go. Verified against the
+            # OBD Auto Doctor capture which uses no suffix and gets
+            # the full 3-frame VIN in 77 ms.
             self.j2534._stream.write(hex_cmd.encode() + b"\r")
-            # Read directly from the stream — do NOT use _elm_cmd("",…)
-            # which writes a bare CR (ELM retransmit), corrupting the
-            # response we're trying to collect.
+            # The ELM doesn't emit `>` until ATST elapses after the
+            # last received byte. Read at least 1500 ms so we don't
+            # return mid-response.
+            effective_timeout = max(timeout_ms, 1500)
             resp = self.j2534._elm_read_until_prompt(
-                self.j2534._stream, timeout_ms,
+                self.j2534._stream, effective_timeout,
             )
             if not resp:
                 return None
