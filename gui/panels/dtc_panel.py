@@ -135,20 +135,30 @@ class DTCPanel(BasePanel):
 
             all_dtcs: list[ModuleDTCs] = []
 
-            # SAE J1979 broadcast pass first. Mode 03 reads stored
-            # emissions DTCs from every OBD-II-compliant ECU at once
-            # — works on every '96+ vehicle including pre-2008 Ford
-            # platforms whose modules NRC UDS Mode 19 (per-module
-            # ReadDTCInformation). Surface the result as a synthetic
-            # "OBD-II" group so the user sees them even when the
-            # per-module UDS pass below returns nothing.
-            try:
-                obd_codes = vehicle.read_obd_dtcs_broadcast(0x03)
-                if obd_codes:
-                    obd_dtcs = [DTC(code=c, status=0x08, raw_bytes=b"")
-                                for c in obd_codes]
+            # SAE J1979 broadcast pass first. Mode 03 = stored, Mode 07 =
+            # pending (failed once but not enough warm-up cycles to be
+            # confirmed), Mode 0A = permanent (confirmed; cleared only
+            # after a clean drive cycle). All three work on every '96+
+            # OBD-II vehicle, including pre-2008 Ford platforms whose
+            # modules NRC UDS Mode 19. Each becomes its own synthetic
+            # group so the user can see exactly which bucket a code
+            # came from.
+            broadcast_modes = (
+                (0x03, "OBD-II (Mode 03 stored)",    "STORED",    0x08),
+                (0x07, "OBD-II (Mode 07 pending)",   "PENDING",   0x04),
+                (0x0A, "OBD-II (Mode 0A permanent)", "PERMANENT", 0x08),
+            )
+            for mode, mod_label, status_label, status_byte in broadcast_modes:
+                try:
+                    self.after(0, lambda lbl=status_label: self.status_label.setText(
+                        f"Reading OBD-II {lbl.lower()} faults..."))
+                    codes = vehicle.read_obd_dtcs_broadcast(mode)
+                    if not codes:
+                        continue
+                    obd_dtcs = [DTC(code=c, status=status_byte, raw_bytes=b"")
+                                for c in codes]
                     all_dtcs.append(ModuleDTCs(
-                        module_name="OBD-II (Mode 03 stored)",
+                        module_name=mod_label,
                         module_abbrev="OBD",
                         dtcs=obd_dtcs,
                     ))
@@ -156,21 +166,38 @@ class DTCPanel(BasePanel):
                         try:
                             vehicle_sync.emit_event(
                                 "dtc", module="OBD",
-                                code=d.code, title="Stored",
-                                payload={"status": "STORED", "source": "mode03"},
+                                code=d.code, title=status_label.title(),
+                                payload={"status": status_label,
+                                         "source": f"mode{mode:02x}"},
                             )
                         except Exception:
                             pass
-            except Exception:
-                pass
+                except Exception:
+                    pass
 
-            wanted = ("PCM", "TCM", "ABS", "RCM", "IPC", "BCM", "EPAS", "HVAC",
-                      "ACM", "APIM", "DDM", "PDM", "PAM", "GWM", "TPMS", "HCM",
-                      "PSCM", "ACC", "FSCM")
-            modules = [m for m in FORD_MODULES if m.abbreviation in wanted]
+            # Per-module UDS Mode 19 pass — only over modules the scanner
+            # actually saw on the bus. The previous "wanted" iteration
+            # burned ~3 s per non-existent module (NO DATA / CAN ERROR);
+            # on a CD3 car probing 19 modules wasted 60+ s of dead time.
+            # If no scan has run yet, do it now so we have a real list.
+            if not vehicle.vehicle_info.modules:
+                self.after(0, lambda: self.status_label.setText(
+                    "Discovering modules on the bus..."))
+                try:
+                    vehicle.scan_modules()
+                except Exception:
+                    pass
 
-            for i, module in enumerate(modules):
-                pct = int((i / len(modules)) * 100)
+            # PCM/TCM are already covered by the Mode 03/07/0A broadcasts
+            # above — re-probing them with UDS Mode 19 returns the same
+            # codes (at best) or NRCs on CD3 (at worst).
+            discovered = [
+                info.module for info in vehicle.vehicle_info.modules
+                if info.module.abbreviation not in ("PCM", "TCM")
+            ]
+
+            for i, module in enumerate(discovered):
+                pct = int((i / max(len(discovered), 1)) * 100)
                 self.after(0, lambda p=pct: self.progress.setValue(p))
                 self.after(0, lambda n=module.name: self.status_label.setText(f"Reading {n}..."))
                 try:
@@ -209,8 +236,12 @@ class DTCPanel(BasePanel):
             total = sum(m.count for m in all_dtcs)
             self.after(0, lambda: self._populate_results(all_dtcs))
             self.after(0, lambda: self.count_label.setText(f"{total} faults found"))
-            self.after(0, lambda: self.status_label.setText(
-                f"Read complete. {total} faults found."))
+            if total == 0:
+                msg = (f"No fault codes found across {len(discovered) + 1} module(s) "
+                       f"(stored, pending, and permanent buckets all clean).")
+            else:
+                msg = f"Read complete. {total} fault(s) across {len(all_dtcs)} module(s)."
+            self.after(0, lambda m=msg: self.status_label.setText(m))
             self.after(0, lambda: self.progress.setValue(100))
             self.after(0, lambda: self.read_btn.setEnabled(True))
             self.after(0, lambda: self.clear_btn.setEnabled(True))
