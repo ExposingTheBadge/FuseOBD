@@ -29,6 +29,15 @@ class UDSSession(IntEnum):
     PROGRAMMING = 0x02
     EXTENDED = 0x03
     FORD_DIAG = 0x85
+    # Pre-2008 Ford / Lincoln / Mercury modules (e.g. 2006 CD3 platform —
+    # Zephyr / Fusion / Milan) speak KWP-on-CAN, not full UDS. They reject
+    # 0x03 / 0x85 / 0x01 with NRC 0x11 (serviceNotSupported) but accept
+    # Ford's legacy session subfunctions:
+    #   0x81 — Ford default-extended (KWP-style)
+    #   0xC0 — Ford legacy startDiagnosticSession (FUN_005491f0 in the
+    #          decompiled IDS binary; observed on CD3 / U-platform PCMs)
+    FORD_LEGACY_81 = 0x81
+    FORD_LEGACY_C0 = 0xC0
 
 
 class DTCSubFunction(IntEnum):
